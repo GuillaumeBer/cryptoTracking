@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install)",
+      "Bash(npm init:*)",
+      "Bash(npm install:*)",
+      "Bash(npm run dev:*)",
+      "Bash(curl -X POST https://gateway-arbitrum.network.thegraph.com/api/dec44da04027010f04ba25886c2d62ab/subgraphs/id/DLuE98kEb5pQNXAcKFQGQgfSQ57Xdou4jnVbAEqMfy3B -H \"Content-Type: application/json\" -d '{\"\"query\"\":\"\"{ userReserves(first: 1) { id reserve { id symbol decimals name } } }\"\"}')",
+      "Bash(curl -X POST https://gateway-arbitrum.network.thegraph.com/api/dec44da04027010f04ba25886c2d62ab/subgraphs/id/DLuE98kEb5pQNXAcKFQGQgfSQ57Xdou4jnVbAEqMfy3B -H \"Content-Type: application/json\" -d '{\"\"query\"\":\"\"{ userReserves(first: 1 where: {currentTotalDebt_gt: \\\"\"0\\\"\"}) { currentTotalDebt currentATokenBalance reserve { id symbol decimals liquidationThreshold } } }\"\"}')",
+      "Bash(curl -X POST https://gateway-arbitrum.network.thegraph.com/api/dec44da04027010f04ba25886c2d62ab/subgraphs/id/DLuE98kEb5pQNXAcKFQGQgfSQ57Xdou4jnVbAEqMfy3B -H \"Content-Type: application/json\" -d '{\"\"query\"\":\"\"{ __type(name: \\\"\"Reserve\\\"\") { fields { name } } }\"\"}')"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
