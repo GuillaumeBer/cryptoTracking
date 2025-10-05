@@ -130,3 +130,18 @@ public
 
 #build folder
 /build
+
+# Binance API keys (cryptographic keys - NEVER commit!)
+backend/keys/
+*.pem
+*.key
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

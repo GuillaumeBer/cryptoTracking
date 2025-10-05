@@ -4,8 +4,22 @@ import dotenv from 'dotenv';
 import morphoRouter from './routes/morpho';
 import aaveRouter from './routes/aave';
 import jupiterRouter from './routes/jupiter-sdk';
+import hyperliquidRouter from './routes/hyperliquid';
+import onchainRouter from './routes/onchain';
+import bnbScanRouter from './routes/bnb-scan';
+import pricesRouter from './routes/prices';
+import portfolioRouter from './routes/portfolio';
+import { validatePriceApiConfig } from './config/price-api.config';
 
 dotenv.config();
+
+// Validate price API configuration on startup
+try {
+  validatePriceApiConfig();
+} catch (error) {
+  console.error('Failed to validate price API configuration:', error);
+  process.exit(1);
+}
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -18,6 +32,11 @@ app.use(express.json());
 app.use('/api/morpho', morphoRouter);
 app.use('/api/aave', aaveRouter);
 app.use('/api/jupiter', jupiterRouter);
+app.use('/api/hyperliquid', hyperliquidRouter);
+app.use('/api/onchain', onchainRouter);
+app.use('/api/bnb-scan', bnbScanRouter);
+app.use('/api/prices', pricesRouter);
+app.use('/api/portfolio', portfolioRouter);
 
 // Health check
 app.get('/health', (req: Request, res: Response) => {
