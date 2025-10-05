@@ -26,6 +26,10 @@ interface MorphoPosition {
     state: {
       borrowApy: number;
       supplyApy: number;
+      netBorrowApy: number | null;
+      netSupplyApy: number | null;
+      weeklyBorrowApy: number | null;
+      weeklyNetBorrowApy: number | null;
     };
   };
   borrowAssets: string;
@@ -65,6 +69,10 @@ async function fetchMorphoData(walletAddress: string, chainId: number): Promise<
             state {
               borrowApy
               supplyApy
+              netBorrowApy
+              netSupplyApy
+              weeklyBorrowApy
+              weeklyNetBorrowApy
             }
           }
           borrowAssets
@@ -125,14 +133,40 @@ router.get('/', async (req: Request, res: Response) => {
       fetchMorphoData(walletAddress, POLYGON_CHAIN_ID),
     ]);
 
-    // Filter only positions with borrowed assets
-    const arbitrumBorrowPositions = arbitrumData?.marketPositions?.filter(
+    // Filter only positions with borrowed assets and add health factor
+    const arbitrumBorrowPositions = (arbitrumData?.marketPositions?.filter(
       (pos: MorphoPosition) => parseFloat(pos.borrowAssets) > 0
-    ) || [];
+    ) || []).map((pos: MorphoPosition) => {
+      // Calculate health factor for Morpho
+      // Health Factor = (Collateral USD × LLTV) / Borrow USD
+      // LLTV is already in decimal form (e.g., 0.86 for 86%)
+      const lltvDecimal = pos.market.lltv / 1e18;
+      const healthFactor = pos.borrowAssetsUsd > 0
+        ? (pos.collateralUsd * lltvDecimal) / pos.borrowAssetsUsd
+        : null;
 
-    const polygonBorrowPositions = polygonData?.marketPositions?.filter(
+      return {
+        ...pos,
+        healthFactor,
+        priceSource: 'morpho-api', // Morpho API provides USD values directly
+      };
+    });
+
+    const polygonBorrowPositions = (polygonData?.marketPositions?.filter(
       (pos: MorphoPosition) => parseFloat(pos.borrowAssets) > 0
-    ) || [];
+    ) || []).map((pos: MorphoPosition) => {
+      // Calculate health factor for Morpho
+      const lltvDecimal = pos.market.lltv / 1e18;
+      const healthFactor = pos.borrowAssetsUsd > 0
+        ? (pos.collateralUsd * lltvDecimal) / pos.borrowAssetsUsd
+        : null;
+
+      return {
+        ...pos,
+        healthFactor,
+        priceSource: 'morpho-api', // Morpho API provides USD values directly
+      };
+    });
 
     res.json({
       success: true,

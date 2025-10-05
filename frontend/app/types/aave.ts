@@ -3,6 +3,7 @@ export interface CollateralAsset {
   name: string;
   amount: number;
   amountUsd: number;
+  priceSource: string;
 }
 
 export interface AavePosition {
@@ -23,6 +24,7 @@ export interface AavePosition {
   liquidationThreshold: number;
   maxLTV: number;
   usageAsCollateral: boolean;
+  healthFactor: number | null;
 }
 
 export interface AaveChainPositions {

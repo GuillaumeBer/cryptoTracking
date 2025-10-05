@@ -117,7 +117,7 @@ async function fetchAaveData(walletAddress: string, subgraphUrl: string): Promis
 }
 
 // Price cache to avoid excessive API calls
-const priceCache: { [key: string]: { price: number; timestamp: number } } = {};
+const priceCache: { [key: string]: { price: number; timestamp: number; source: string } } = {};
 const PRICE_CACHE_DURATION = 5 * 60 * 1000; // 5 minutes cache
 
 // Map token symbols to Binance trading pairs (prefer Binance for better rate limits)
@@ -146,9 +146,9 @@ const COINGECKO_SYMBOL_MAP: { [key: string]: string } = {
   'weETH': 'wrapped-eeth',
   'wstETH': 'wrapped-steth',
   'sAVAX': 'benqi-liquid-staked-avax',
-  'S': 'sonic-2',
-  'wS': 'sonic-2',
-  'SONIC': 'sonic-2',
+  'S': 'sonic-3',
+  'wS': 'sonic-3',
+  'SONIC': 'sonic-3',
 };
 
 // Fallback prices when all APIs fail
@@ -173,9 +173,9 @@ const FALLBACK_PRICES: { [key: string]: number } = {
   'sAVAX': 38,
   'BNB': 620,
   'WBNB': 620,
-  'S': 0.85,
-  'wS': 0.85,
-  'SONIC': 0.85,
+  'S': 0.27,
+  'wS': 0.27,
+  'SONIC': 0.27,
 };
 
 // Fetch prices from Binance API
@@ -281,15 +281,15 @@ async function fetchCoinGeckoPrices(symbols: string[]): Promise<{ [symbol: strin
 }
 
 // Batch fetch multiple token prices using Binance (preferred) and CoinGecko (fallback)
-async function fetchMultipleTokenPrices(symbols: string[]): Promise<{ [symbol: string]: number }> {
+async function fetchMultipleTokenPrices(symbols: string[]): Promise<{ [symbol: string]: { price: number; source: string } }> {
   const now = Date.now();
   const uncachedSymbols: string[] = [];
-  const result: { [symbol: string]: number } = {};
+  const result: { [symbol: string]: { price: number; source: string } } = {};
 
   // Check cache for each symbol
   for (const symbol of symbols) {
     if (priceCache[symbol] && (now - priceCache[symbol].timestamp) < PRICE_CACHE_DURATION) {
-      result[symbol] = priceCache[symbol].price;
+      result[symbol] = { price: priceCache[symbol].price, source: priceCache[symbol].source };
     } else {
       uncachedSymbols.push(symbol);
     }
@@ -312,25 +312,40 @@ async function fetchMultipleTokenPrices(symbols: string[]): Promise<{ [symbol: s
 
   // Merge results and cache
   for (const symbol of uncachedSymbols) {
-    let price = binancePrices[symbol] || coinGeckoPrices[symbol] || FALLBACK_PRICES[symbol] || 1;
+    let price: number;
+    let source: string;
 
-    priceCache[symbol] = { price, timestamp: now };
-    result[symbol] = price;
+    if (binancePrices[symbol]) {
+      price = binancePrices[symbol];
+      source = 'binance';
+    } else if (coinGeckoPrices[symbol]) {
+      price = coinGeckoPrices[symbol];
+      source = 'coingecko';
+    } else if (FALLBACK_PRICES[symbol]) {
+      price = FALLBACK_PRICES[symbol];
+      source = 'fallback';
+    } else {
+      price = 1;
+      source = 'default';
+    }
+
+    priceCache[symbol] = { price, timestamp: now, source };
+    result[symbol] = { price, source };
   }
 
   return result;
 }
 
-async function fetchTokenPrice(symbol: string): Promise<number> {
+async function fetchTokenPrice(symbol: string): Promise<{ price: number; source: string }> {
   const prices = await fetchMultipleTokenPrices([symbol]);
-  return prices[symbol] || 1;
+  return prices[symbol] || { price: 1, source: 'default' };
 }
 
 // Helper function to calculate USD value
 async function calculateUSDValue(amount: string, decimals: number, symbol: string): Promise<number> {
   const normalizedAmount = parseFloat(amount) / Math.pow(10, decimals);
-  const price = await fetchTokenPrice(symbol);
-  return normalizedAmount * price;
+  const priceData = await fetchTokenPrice(symbol);
+  return normalizedAmount * priceData.price;
 }
 
 // Helper function to process positions
@@ -351,31 +366,62 @@ async function processPositions(userData: AaveUser | null) {
   // Batch fetch all prices at once
   const prices = await fetchMultipleTokenPrices(Array.from(allSymbols));
 
-  // Calculate collateral assets with pre-fetched prices
+  // Calculate collateral assets with pre-fetched prices and liquidation thresholds
   const collateralAssets = collateralReserves.map(reserve => {
     const amount = parseFloat(reserve.currentATokenBalance) / Math.pow(10, reserve.reserve.decimals);
-    const price = prices[reserve.reserve.symbol] || 1;
+    const priceData = prices[reserve.reserve.symbol] || { price: 1, source: 'default' };
+    const amountUsd = amount * priceData.price;
+    const liquidationThreshold = parseFloat(reserve.reserve.reserveLiquidationThreshold) / 10000;
     return {
       symbol: reserve.reserve.symbol,
       name: reserve.reserve.name,
       amount: amount,
-      amountUsd: amount * price,
+      amountUsd: amountUsd,
+      priceSource: priceData.source,
+      liquidationThreshold: liquidationThreshold,
+      weightedLiquidationThreshold: amountUsd * liquidationThreshold,
     };
   });
 
   const totalCollateralUsd = collateralAssets.reduce((total, asset) => total + asset.amountUsd, 0);
 
+  // Calculate weighted average liquidation threshold based on collateral
+  const totalWeightedLiquidationThreshold = collateralAssets.reduce(
+    (total, asset) => total + asset.weightedLiquidationThreshold,
+    0
+  );
+  const weightedAvgLiquidationThreshold = totalCollateralUsd > 0
+    ? totalWeightedLiquidationThreshold / totalCollateralUsd
+    : 0;
+
   // Map borrowed positions with pre-fetched prices
   return borrowedReserves.map(reserve => {
     const borrowAmountFormatted = parseFloat(reserve.currentTotalDebt) / Math.pow(10, reserve.reserve.decimals);
-    const price = prices[reserve.reserve.symbol] || 1;
+    const priceData = prices[reserve.reserve.symbol] || { price: 1, source: 'default' };
+    const borrowAmountUsd = borrowAmountFormatted * priceData.price;
+
+    // Clean up collateralAssets to only include display fields
+    const displayCollateralAssets = collateralAssets.map(asset => ({
+      symbol: asset.symbol,
+      name: asset.name,
+      amount: asset.amount,
+      amountUsd: asset.amountUsd,
+      priceSource: asset.priceSource,
+    }));
+
+    // Calculate health factor
+    // Health Factor = (Total Collateral × Liquidation Threshold) / Total Debt
+    // If health factor < 1, the position can be liquidated
+    const healthFactor = borrowAmountUsd > 0
+      ? (totalCollateralUsd * weightedAvgLiquidationThreshold) / borrowAmountUsd
+      : null; // null if no debt
 
     return {
       asset: reserve.reserve.symbol,
       assetName: reserve.reserve.name,
       borrowAmount: reserve.currentTotalDebt,
       borrowAmountFormatted: borrowAmountFormatted,
-      borrowAmountUsd: borrowAmountFormatted * price,
+      borrowAmountUsd: borrowAmountUsd,
       variableDebt: reserve.currentVariableDebt,
       stableDebt: reserve.currentStableDebt,
       borrowRate: parseFloat(reserve.stableBorrowRate) > 0 ? reserve.stableBorrowRate : reserve.reserve.variableBorrowRate,
@@ -385,11 +431,12 @@ async function processPositions(userData: AaveUser | null) {
       collateralAmount: '', // Not applicable for aggregate collateral
       collateralAmountFormatted: 0, // Not applicable for aggregate collateral
       collateralAmountUsd: totalCollateralUsd, // Total collateral across all assets
-      collateralAssets: collateralAssets, // List of all collateral assets
+      collateralAssets: displayCollateralAssets, // List of all collateral assets
       decimals: reserve.reserve.decimals,
-      liquidationThreshold: parseFloat(reserve.reserve.reserveLiquidationThreshold) / 10000, // Convert basis points to decimal
+      liquidationThreshold: weightedAvgLiquidationThreshold, // Weighted average based on collateral
       maxLTV: parseFloat(reserve.reserve.baseLTVasCollateral) / 10000, // Convert basis points to decimal
       usageAsCollateral: reserve.usageAsCollateralEnabledOnUser,
+      healthFactor: healthFactor, // Health factor for this position
     };
   });
 }

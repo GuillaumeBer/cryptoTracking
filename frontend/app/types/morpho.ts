@@ -7,6 +7,10 @@ export interface MorphoAsset {
 export interface MorphoMarketState {
   borrowApy: number;
   supplyApy: number;
+  netBorrowApy: number | null;
+  netSupplyApy: number | null;
+  weeklyBorrowApy: number | null;
+  weeklyNetBorrowApy: number | null;
 }
 
 export interface MorphoMarket {
@@ -27,6 +31,8 @@ export interface MorphoPosition {
   supplyAssets: string;
   supplyAssetsUsd: number;
   supplyShares: string;
+  healthFactor: number | null;
+  priceSource: string;
 }
 
 export interface ChainPositions {

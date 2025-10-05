@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import morphoRouter from './routes/morpho';
 import aaveRouter from './routes/aave';
+import jupiterRouter from './routes/jupiter-sdk';
 
 dotenv.config();
 
@@ -16,6 +17,7 @@ app.use(express.json());
 // Routes
 app.use('/api/morpho', morphoRouter);
 app.use('/api/aave', aaveRouter);
+app.use('/api/jupiter', jupiterRouter);
 
 // Health check
 app.get('/health', (req: Request, res: Response) => {
