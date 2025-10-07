@@ -401,6 +401,125 @@ test: Add tests
 - Error tracking (Sentry)
 - Monitoring (Grafana)
 
+## Hyperliquid Delta-Neutral Strategy Features (Level 3 Cards)
+
+**Goal**: Maximize returns on delta-neutral strategies and monitor positions for optimal exit timing.
+
+### Implementation Roadmap
+
+#### Phase 1: Critical Features (Immediate Priority)
+1. **✅ Funding Rate Analytics Card** 📊 ✅ COMPLETED (2025-10-07)
+   - Current funding rate (APR %)
+   - 8-hour funding history trend chart
+   - Estimated daily/monthly funding revenue at current rate
+   - Funding rate comparison vs 7-day average
+   - Alert thresholds when rate drops below target (e.g., <10% APR)
+   - Next funding time countdown
+   - **API**: `type: 'fundingHistory'`, `type: 'metaAndAssetCtxs'`
+   - **Location**: Level 2 expandable section, first card in position details
+
+2. **✅ Liquidation Risk Monitor Card** ⚠️
+   - Safe buffer zone visualization (current vs recommended 20%+)
+   - Price alert thresholds at 20%, 15%, 10%, 5% from liquidation
+   - Estimated time to liquidation at current price volatility
+   - Historical volatility (24h/7d price swings)
+   - Recommended margin add to reach safe threshold
+   - Auto-rebalancing suggestions (reduce leverage if too risky)
+
+3. **✅ Auto-Close Recommendations Card** 🤖
+   - Exit trigger status checks:
+     - Funding rate below threshold (e.g., <8% APR)
+     - Liquidation distance < 15%
+     - Unrealized PnL wiping out funding gains
+     - Net gain target reached (e.g., +$500)
+     - Position held > target duration (e.g., 30 days)
+   - Overall recommendation: HOLD / MONITOR / CLOSE SOON / CLOSE NOW
+   - Estimated exit profit after closing fees
+   - Optimal exit strategy (gradual vs immediate)
+
+#### Phase 2: High Value Features
+4. **⏳ ROI & Break-Even Analysis Card** 💰
+   - Net ROI % (Net Gain / Total Capital Invested)
+   - Daily/Monthly ROI (annualized returns)
+   - Break-even point: Days until total fees covered by funding
+   - Effective APR after all fees
+   - Fee efficiency ratio: Funding revenue vs total fees paid
+   - Time in position tracker
+
+5. **⏳ Position Health Score Card** 🎯
+   - Composite health score (0-100) based on:
+     - Liquidation distance (40% weight)
+     - Delta neutrality (25% weight)
+     - Funding rate trend (20% weight)
+     - Net gain (15% weight)
+   - Health trend (improving/stable/deteriorating)
+   - Key risk factors highlighted
+   - Color-coded status (excellent/good/fair/poor/critical)
+
+6. **⏳ Funding vs. Unrealized PnL Comparison** 📈
+   - Funding earned (green)
+   - Unrealized PnL from price movement (red if losing on short)
+   - Combined P&L (funding + unrealized)
+   - Price impact tolerance: How much price can move before wiping out funding gains
+   - Breakout price levels: Where unrealized losses exceed funding revenue
+
+#### Phase 3: Optimization Features
+7. **⏳ Delta Imbalance Impact Card** ⚖️
+   - Exposure value in USD (current delta imbalance × mark price)
+   - Price impact simulation: Profit/loss if price moves ±5%, ±10%, ±20%
+   - Hedging cost estimate: Fees to rebalance to delta neutral
+   - Risk score (low/medium/high based on imbalance %)
+   - Recommended action priority (urgent/monitor/safe)
+
+8. **⏳ Fee Breakdown & Optimization Card** 💸
+   - Fee efficiency % (Funding revenue / Total fees)
+   - Historical fees vs funding chart
+   - Average fee per trade
+   - Projected annual fees at current trade frequency
+   - Fee optimization tips:
+     - Reduce rebalancing frequency
+     - Use limit orders instead of market
+     - Minimum position duration to justify fees
+
+9. **⏳ Cross-Position Portfolio Card** 🌐
+   - Total portfolio exposure
+   - Average funding rate across all positions
+   - Worst liquidation distance (highest risk position)
+   - Portfolio net gain
+   - Correlation risk: Positions on correlated assets
+   - Diversification score
+
+10. **⏳ Historical Performance Card** 📜
+    - Cumulative funding revenue chart (all-time)
+    - Monthly P&L breakdown
+    - Best/worst performing months
+    - Average position duration
+    - Success rate (% of closed positions that were profitable)
+    - Lessons learned (e.g., "Positions held >60 days had 85% success rate")
+
+### Technical Implementation Notes
+
+**Additional Hyperliquid API Endpoints Required**:
+```typescript
+// Get current funding rates and metadata
+POST https://api.hyperliquid.xyz/info
+{ "type": "metaAndAssetCtxs" }
+
+// Get historical funding rates for a specific coin
+POST https://api.hyperliquid.xyz/info
+{ "type": "fundingHistory", "coin": "BTC", "startTime": timestamp }
+
+// Get candle data for volatility analysis
+POST https://api.hyperliquid.xyz/info
+{ "type": "candleSnapshot", "coin": "BTC", "interval": "1h" }
+```
+
+**Implementation Status**:
+- ✅ Completed
+- 🚧 In Progress
+- ⏳ Planned
+- ❌ Blocked/Deprecated
+
 ## Testing Checklist
 
 When making changes:

@@ -35,7 +35,20 @@
       "Bash(pkill:*)",
       "Bash(taskkill:*)",
       "Bash(npx tsc:*)",
-      "Bash(/dev/null)"
+      "Bash(/dev/null)",
+      "Bash(findstr:*)",
+      "Bash(NODE_ENV=production node test-fixed-earn.js)",
+      "Bash(awk:*)",
+      "Bash(netstat:*)",
+      "Bash(npx next lint:*)",
+      "Bash(tasklist)",
+      "Bash(if [ -f nul ])",
+      "Bash(then rm nul)",
+      "Bash(fi)",
+      "Bash(if [ -f backend/nul ])",
+      "Bash(then rm backend/nul)",
+      "Bash(if [ -f frontend/nul ])",
+      "Bash(then rm frontend/nul)"
     ],
     "deny": [],
     "ask": []

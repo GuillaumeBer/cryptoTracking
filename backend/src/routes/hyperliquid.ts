@@ -10,6 +10,8 @@ import {
   HyperliquidSpotState,
   HyperliquidFundingItem,
   HyperliquidUserFill,
+  HyperliquidMetaAndAssetCtxs,
+  HyperliquidFundingHistoryItem,
 } from '../types/hyperliquid';
 
 const router = express.Router();
@@ -18,6 +20,17 @@ interface DeltaNeutralAction {
   action: 'buy' | 'sell' | 'increase_short' | 'decrease_short';
   amount: number;
   reason: string;
+}
+
+interface FundingRateData {
+  currentRate: number; // Current funding rate (hourly rate)
+  currentRateApr: number; // Annualized APR
+  nextFundingTime: number; // Timestamp of next funding
+  avgRate7d: number; // 7-day average funding rate (hourly)
+  avgRate7dApr: number; // 7-day average APR
+  history: Array<{ time: number; rate: number; rateApr: number }>; // Last 168 funding periods (7 days)
+  estimatedDailyRevenue: number; // Estimated daily revenue in USD at current rate
+  estimatedMonthlyRevenue: number; // Estimated monthly revenue in USD at current rate
 }
 
 interface HyperliquidPosition {
@@ -45,8 +58,10 @@ interface HyperliquidPosition {
   totalFees?: number; // Total fees (Hyperliquid + Binance equivalent)
   futureClosingFees?: number; // Estimated fees to close both positions
   netGain?: number; // Net gain after all fees and imbalance: fundingPnl - totalFees - futureClosingFees
-  netGainAdjusted?: number; // Net gain adjusted for delta imbalance exposure
-  tradeCount?: number; // Number of trades executed
+  netGainAdjusted?: number;
+  tradeCount?: number;
+  fundingRate?: FundingRateData;
+  fundingHistoryRaw?: any[]; // For debugging
 }
 
 
@@ -156,6 +171,92 @@ router.get('/', async (req: Request, res: Response) => {
     // Filter only short positions (negative size)
     const shortPositions = positions.filter(p => p.positionSize < 0);
 
+    // Fetch funding rate history for each position (last 7 days)
+    // We'll get current rate from the most recent history entry
+    const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+    const fundingRateHistory: { [coin: string]: FundingRateData } = {};
+
+    for (const position of shortPositions) {
+      const coin = position.coin;
+
+      // Initialize with default values
+      const defaultFundingData: FundingRateData = {
+        currentRate: 0,
+        currentRateApr: 0,
+        nextFundingTime: 0,
+        avgRate7d: 0,
+        avgRate7dApr: 0,
+        history: [],
+        estimatedDailyRevenue: 0,
+        estimatedMonthlyRevenue: 0,
+      };
+
+      try {
+        const historyResponse = await fetch('https://api.hyperliquid.xyz/info', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            type: 'fundingHistory',
+            coin: coin,
+            startTime: sevenDaysAgo,
+          }),
+        });
+
+        if (historyResponse.ok) {
+          const historyData = await historyResponse.json() as HyperliquidFundingHistoryItem[];
+
+          if (Array.isArray(historyData) && historyData.length > 0) {
+            // Get current rate from most recent funding history entry
+            const sortedHistory = [...historyData].sort((a, b) => b.time - a.time);
+            const currentRate = parseFloat(sortedHistory[0].fundingRate);
+            const currentRateApr = currentRate * 24 * 365 * 100;
+
+            // Calculate 7-day average
+            const rates = historyData.map(h => parseFloat(h.fundingRate));
+            const avgRate7d = rates.reduce((sum, r) => sum + r, 0) / rates.length;
+            const avgRate7dApr = avgRate7d * 24 * 365 * 100;
+
+            // Create history array with timestamps and rates
+            const history = historyData.map(h => ({
+              time: h.time,
+              rate: parseFloat(h.fundingRate),
+              rateApr: parseFloat(h.fundingRate) * 24 * 365 * 100,
+            })).sort((a, b) => a.time - b.time);
+
+            // Calculate next funding time (every hour on the hour)
+            const now = new Date();
+            const nextFundingTime = new Date(now);
+            nextFundingTime.setUTCHours(now.getUTCHours() + 1, 0, 0, 0);
+
+            // Estimate daily/monthly revenue
+            const positionValue = position.positionValueUsd;
+            const estimatedDailyRevenue = positionValue * currentRate * 24;
+            const estimatedMonthlyRevenue = estimatedDailyRevenue * 30;
+
+            fundingRateHistory[coin] = {
+              currentRate,
+              currentRateApr,
+              nextFundingTime: nextFundingTime.getTime(),
+              avgRate7d,
+              avgRate7dApr,
+              history: history.slice(-168),
+              estimatedDailyRevenue,
+              estimatedMonthlyRevenue,
+            };
+          } else {
+            fundingRateHistory[coin] = defaultFundingData;
+          }
+        } else {
+          fundingRateHistory[coin] = defaultFundingData;
+        }
+      } catch (err) {
+        console.error(`Error fetching funding history for ${coin}:`, err);
+        fundingRateHistory[coin] = defaultFundingData;
+      }
+    }
+
     // Fetch trade history (userFills) to calculate fees
     const fillsResponse = await fetch('https://api.hyperliquid.xyz/info', {
       method: 'POST',
@@ -176,27 +277,29 @@ router.get('/', async (req: Request, res: Response) => {
     if (fillsResponse.ok) {
       const fills = (await fillsResponse.json()) as HyperliquidUserFill[];
 
-      fills.forEach((fill) => {
-        const coin = fill.coin;
-        const hyperliquidFee = parseFloat(fill.fee || '0');
-        const builderFee = parseFloat(fill.builderFee || '0');
-        const totalHyperliquidFee = hyperliquidFee + builderFee;
+      if (Array.isArray(fills)) {
+        fills.forEach((fill) => {
+          const coin = fill.coin;
+          const hyperliquidFee = parseFloat(fill.fee || '0');
+          const builderFee = parseFloat(fill.builderFee || '0');
+          const totalHyperliquidFee = hyperliquidFee + builderFee;
 
-        // Calculate trade value in USDC
-        const tradeValue = parseFloat(fill.px) * parseFloat(fill.sz);
-        const binanceFee = tradeValue * BINANCE_SPOT_FEE_RATE;
+          // Calculate trade value in USDC
+          const tradeValue = parseFloat(fill.px) * parseFloat(fill.sz);
+          const binanceFee = tradeValue * BINANCE_SPOT_FEE_RATE;
 
-        // Accumulate fees by coin
-        if (!hyperliquidFeesByCoin[coin]) {
-          hyperliquidFeesByCoin[coin] = 0;
-          binanceFeesByCoin[coin] = 0;
-          tradeCountByCoin[coin] = 0;
-        }
+          // Accumulate fees by coin
+          if (!hyperliquidFeesByCoin[coin]) {
+            hyperliquidFeesByCoin[coin] = 0;
+            binanceFeesByCoin[coin] = 0;
+            tradeCountByCoin[coin] = 0;
+          }
 
-        hyperliquidFeesByCoin[coin] += totalHyperliquidFee;
-        binanceFeesByCoin[coin] += binanceFee;
-        tradeCountByCoin[coin]++;
-      });
+          hyperliquidFeesByCoin[coin] += totalHyperliquidFee;
+          binanceFeesByCoin[coin] += binanceFee;
+          tradeCountByCoin[coin]++;
+        });
+      }
     }
 
     // Fetch funding history
@@ -208,7 +311,7 @@ router.get('/', async (req: Request, res: Response) => {
       body: JSON.stringify({
         type: 'userFunding',
         user: address,
-        startTime: 1704067200000, // Start of 2024
+        startTime: 0, // Fetch all time
       }),
     });
 
@@ -219,38 +322,40 @@ router.get('/', async (req: Request, res: Response) => {
     if (fundingResponse.ok) {
       const fundingData = (await fundingResponse.json()) as HyperliquidFundingItem[];
 
-      // Hyperliquid funding occurs every 8 hours
-      const eightHoursAgo = Date.now() - (8 * 60 * 60 * 1000);
+      if (Array.isArray(fundingData)) {
+        // Hyperliquid funding occurs every 8 hours
+        const eightHoursAgo = Date.now() - (8 * 60 * 60 * 1000);
 
-      // Calculate total funding PnL per coin (all time) and current session (last 8 hours)
-      fundingData.forEach((item) => {
-        if (item.delta.type === 'funding') {
-          const coin = item.delta.coin;
-          const fundingAmount = parseFloat(item.delta.usdc);
-          const fundingTime = item.time;
+        fundingData.forEach((item) => {
+          if (item.delta && item.delta.type === 'funding') {
+            const coin = item.delta.coin;
+            const fundingAmount = parseFloat(item.delta.usdc);
+            const fundingTime = item.time;
 
-          // All-time funding
-          if (!fundingByCoin[coin]) {
-            fundingByCoin[coin] = 0;
-          }
-          fundingByCoin[coin] += fundingAmount;
-          totalFundingPnl += fundingAmount;
-
-          // Current session (last 8 hours)
-          if (fundingTime > eightHoursAgo) {
-            if (!currentSessionFundingByCoin[coin]) {
-              currentSessionFundingByCoin[coin] = 0;
+            // All-time funding
+            if (!fundingByCoin[coin]) {
+              fundingByCoin[coin] = 0;
             }
-            currentSessionFundingByCoin[coin] += fundingAmount;
-          }
-        }
-      });
+            fundingByCoin[coin] += fundingAmount;
+            totalFundingPnl += fundingAmount;
 
-      // Add funding PnL to positions
-      shortPositions.forEach((position) => {
-        position.fundingPnl = fundingByCoin[position.coin] || 0;
-        position.currentSessionFunding = currentSessionFundingByCoin[position.coin] || 0;
-      });
+            // Current session (last 8 hours)
+            if (fundingTime > eightHoursAgo) {
+              if (!currentSessionFundingByCoin[coin]) {
+                currentSessionFundingByCoin[coin] = 0;
+              }
+              currentSessionFundingByCoin[coin] += fundingAmount;
+            }
+          }
+        });
+
+        // Add funding PnL and raw history to positions
+        shortPositions.forEach((position) => {
+          position.fundingPnl = fundingByCoin[position.coin] || 0;
+          position.currentSessionFunding = currentSessionFundingByCoin[position.coin] || 0;
+          position.fundingHistoryRaw = fundingData.filter(item => item.delta && item.delta.type === 'funding' && item.delta.coin === position.coin);
+        });
+      }
     }
 
     // Add fee data to each position (net gain will be calculated later with spot balances)
@@ -335,11 +440,13 @@ router.get('/', async (req: Request, res: Response) => {
       const bnbTokens = await bnbScanner.scanWallet(address, 0.01); // Min $0.01 value
 
       // Merge BNB Chain token balances
-      bnbTokens.forEach((token) => {
-        spotBalances[token.symbol] = (spotBalances[token.symbol] || 0) + token.balance;
-      });
+      if (Array.isArray(bnbTokens)) {
+        bnbTokens.forEach((token) => {
+          spotBalances[token.symbol] = (spotBalances[token.symbol] || 0) + token.balance;
+        });
 
-      console.log(`✅ Merged ${bnbTokens.length} tokens from BNB Chain (found: ${bnbTokens.map(t => t.symbol).join(', ')})`);
+        console.log(`✅ Merged ${bnbTokens.length} tokens from BNB Chain (found: ${bnbTokens.map(t => t.symbol).join(', ')})`);
+      }
     } catch (error) {
       console.error('Error fetching BNB Chain tokens:', error);
       // Continue without BNB Chain tokens if there's an error
@@ -442,6 +549,13 @@ router.get('/', async (req: Request, res: Response) => {
             reason: `You have ${Math.abs(imbalance).toFixed(2)} ${position.coin} more in spot than short (${imbalancePercent.toFixed(1)}% imbalance). Sell ${Math.abs(imbalance).toFixed(2)} ${position.coin} from spot to reach delta neutral.`
           };
         }
+      }
+    });
+
+    // Attach funding rate data to positions
+    shortPositions.forEach((position) => {
+      if (fundingRateHistory[position.coin]) {
+        position.fundingRate = fundingRateHistory[position.coin];
       }
     });
 

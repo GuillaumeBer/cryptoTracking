@@ -70,3 +70,42 @@ export interface HyperliquidUserFill {
   twapId: string | null;
   builderFee?: string; // Optional builder fee
 }
+
+/**
+ * Funding Rate History Response
+ */
+export interface HyperliquidFundingHistoryItem {
+  coin: string;
+  fundingRate: string; // Funding rate as a decimal string (e.g., "0.0001" = 0.01%)
+  premium: string;
+  time: number; // Timestamp in milliseconds
+}
+
+/**
+ * Meta and Asset Context Response (contains current funding rates)
+ */
+export interface HyperliquidAssetContext {
+  funding: string; // Current funding rate
+  openInterest: string;
+  prevDayPx: string;
+  dayNtlVlm: string;
+  premium: string;
+  oraclePx: string;
+  markPx: string;
+  midPx: string;
+  impactPxs: string[];
+}
+
+export interface HyperliquidUniverse {
+  name: string;
+  szDecimals: number;
+  maxLeverage: number;
+  onlyIsolated: boolean;
+}
+
+export interface HyperliquidMetaAndAssetCtxsItem {
+  universe: HyperliquidUniverse[];
+  assetCtxs: HyperliquidAssetContext[];
+}
+
+export type HyperliquidMetaAndAssetCtxs = HyperliquidMetaAndAssetCtxsItem[];

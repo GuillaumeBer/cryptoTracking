@@ -10,6 +10,17 @@ interface DeltaNeutralAction {
   reason: string;
 }
 
+interface FundingRateData {
+  currentRate: number;
+  currentRateApr: number;
+  nextFundingTime: number;
+  avgRate7d: number;
+  avgRate7dApr: number;
+  history: Array<{ time: number; rate: number; rateApr: number }>;
+  estimatedDailyRevenue: number;
+  estimatedMonthlyRevenue: number;
+}
+
 interface HyperliquidPosition {
   coin: string;
   entryPrice: number;
@@ -37,6 +48,7 @@ interface HyperliquidPosition {
   netGain?: number;
   netGainAdjusted?: number;
   tradeCount?: number;
+  fundingRate?: FundingRateData;
 }
 
 export default function HyperliquidPage() {
@@ -332,26 +344,85 @@ export default function HyperliquidPage() {
                         </div>
                       </div>
 
-                      {/* Simplified Liquidation Risk */}
-                      <div className={`mb-4 p-5 rounded-lg border ${riskLevel.borderColor} ${riskLevel.bgColor}`}>
-                        <div className="flex justify-between items-center mb-3">
-                          <span className="text-sm font-semibold text-slate-700 dark:text-slate-300">Liquidation Risk</span>
-                          <span className={`text-xs font-bold uppercase px-2.5 py-1 rounded-md ${riskLevel.color} text-white`}>
-                            {riskLevel.level}
-                          </span>
-                        </div>
-                        <div className="flex items-baseline gap-2">
-                          <span className={`text-2xl font-bold ${riskLevel.textColor}`}>
-                            {formatCurrency(position.liquidationPrice)}
-                          </span>
-                          <span className={`text-base font-semibold ${riskLevel.textColor}`}>
-                            ({priceToLiquidation > 0 ? '+' : ''}{formatNumber(priceToLiquidation, 1)}%)
-                          </span>
-                        </div>
+                      {/* Price Range Visualizer */}
+                      <div className="mt-4">
+                        {(() => {
+                          const liqPrice = position.liquidationPrice;
+                          const entryPrice = position.entryPrice;
+                          const markPrice = position.markPrice;
+
+                          if (liqPrice <= 0) return null;
+
+                          const minPoint = Math.min(entryPrice, markPrice);
+                          const maxPoint = liqPrice;
+                          const padding = (maxPoint - minPoint) * 0.15;
+                          const chartStartPrice = minPoint - padding;
+                          const chartEndPrice = maxPoint + padding;
+                          const chartRange = chartEndPrice - chartStartPrice;
+
+                          if (chartRange <= 0) return null;
+
+                          const priceToPercent = (price) => (price - chartStartPrice) / chartRange * 100;
+
+                          const entryPercent = priceToPercent(entryPrice);
+                          const markPercent = priceToPercent(markPrice);
+                          const liqPercent = priceToPercent(liqPrice);
+                          const displayLiqPercent = Math.min(liqPercent, 95);
+
+                          const priceAt5Percent = liqPrice * (1 - 0.05);
+                          const priceAt10Percent = liqPrice * (1 - 0.10);
+                          const priceAt20Percent = liqPrice * (1 - 0.20);
+
+                          const pos5 = priceToPercent(priceAt5Percent);
+                          const pos10 = priceToPercent(priceAt10Percent);
+                          const pos20 = priceToPercent(priceAt20Percent);
+
+                          return (
+                            <div className="relative w-full h-16">
+                              {/* Bar with zones */}
+                              <div className="relative w-full h-8 top-4 rounded-lg overflow-hidden">
+                                <div className="absolute inset-0 flex">
+                                  <div className="bg-emerald-500" style={{ width: `${pos20}%` }}></div>
+                                  <div className="bg-yellow-500" style={{ width: `${pos10 - pos20}%` }}></div>
+                                  <div className="bg-amber-500" style={{ width: `${pos5 - pos10}%` }}></div>
+                                  <div className="bg-rose-500" style={{ width: `${liqPercent - pos5}%` }}></div>
+                                </div>
+                              </div>
+
+                              {/* Cursors */}
+                              {/* Entry Price */}
+                              <div className="absolute h-8 top-4 -translate-x-1/2" style={{ left: `${entryPercent}%` }}>
+                                <div className="relative w-1 h-full bg-blue-600/70 shadow-lg">
+                                  <span className="absolute top-10 left-1/2 -translate-x-1/2 text-xs font-bold text-blue-800 dark:text-blue-300 whitespace-nowrap">
+                                    Entry: {formatCurrency(entryPrice)}
+                                  </span>
+                                </div>
+                              </div>
+
+                              {/* Mark Price (Current) */}
+                              <div className="absolute h-8 top-4 -translate-x-1/2" style={{ left: `${markPercent}%` }}>
+                                <div className="relative w-1 h-full bg-white shadow-lg">
+                                  <span className="absolute -top-5 left-1/2 -translate-x-1/2 text-xs font-bold text-slate-800 dark:text-white whitespace-nowrap">
+                                    Current: {formatCurrency(markPrice)}
+                                  </span>
+                                </div>
+                              </div>
+
+                              {/* Liquidation Price */}
+                              <div className="absolute h-8 top-4 -translate-x-1/2" style={{ left: `${displayLiqPercent}%` }}>
+                                <div className="relative w-1 h-full bg-black shadow-lg">
+                                  <span className="absolute top-10 left-1/2 -translate-x-1/2 text-xs font-bold text-black dark:text-white whitespace-nowrap">
+                                    Liq: {formatCurrency(liqPrice)}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
 
                       {/* Delta Neutral Status - Simplified */}
-                      <div className={`mb-4 p-4 rounded-lg border ${
+                      <div className={`mt-8 mb-4 p-4 rounded-lg border ${
                         position.isDeltaNeutral
                           ? 'bg-emerald-50/50 dark:bg-emerald-950/20 border-emerald-500/30'
                           : 'bg-amber-50/50 dark:bg-amber-950/20 border-amber-500/30'
@@ -418,7 +489,218 @@ export default function HyperliquidPage() {
                     {/* Level 2: Detailed Information (Expandable) */}
                     <div className="px-6 pb-8 space-y-8 border-t border-slate-200 dark:border-slate-700 pt-8 bg-slate-50/50 dark:bg-slate-900/30">
 
-                      {/* SECTION 1: Position Overview */}
+                      {/* SECTION 1: Funding Rate Analytics */}
+                      {position.fundingRate && (
+                        <div className="space-y-4">
+                          <div className="flex items-center gap-2 mb-4">
+                            <svg className="w-5 h-5 text-emerald-600 dark:text-emerald-400" fill="currentColor" viewBox="0 0 20 20">
+                              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd"/>
+                            </svg>
+                            <h4 className="text-sm font-bold text-slate-700 dark:text-slate-300">Funding Rate Analytics</h4>
+                          </div>
+
+                          <div className="bg-white dark:bg-slate-800 rounded-lg p-6 border border-slate-200 dark:border-slate-700 space-y-6">
+                            {/* Current Funding Rate */}
+                            <div className="flex justify-between items-center pb-6 border-b border-slate-200 dark:border-slate-700">
+                              <div>
+                                <p className="text-xs text-slate-500 dark:text-slate-400 mb-1">Current Funding Rate (APR)</p>
+                                <p className={`text-3xl font-bold ${
+                                  position.fundingRate.currentRateApr >= 10
+                                    ? 'text-emerald-600 dark:text-emerald-400'
+                                    : position.fundingRate.currentRateApr >= 5
+                                    ? 'text-amber-600 dark:text-amber-400'
+                                    : 'text-rose-600 dark:text-rose-400'
+                                }`}>
+                                  {position.fundingRate.currentRateApr >= 0 ? '+' : ''}{formatNumber(position.fundingRate.currentRateApr, 2)}%
+                                </p>
+                                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                                  8hr: {position.fundingRate.currentRate >= 0 ? '+' : ''}{(position.fundingRate.currentRate * 100).toFixed(4)}%
+                                </p>
+                              </div>
+                              <div className="text-right">
+                                <p className="text-xs text-slate-500 dark:text-slate-400 mb-1">7-Day Average</p>
+                                <p className={`text-2xl font-semibold ${
+                                  position.fundingRate.avgRate7dApr >= 10
+                                    ? 'text-emerald-600 dark:text-emerald-400'
+                                    : position.fundingRate.avgRate7dApr >= 5
+                                    ? 'text-amber-600 dark:text-amber-400'
+                                    : 'text-slate-600 dark:text-slate-400'
+                                }`}>
+                                  {position.fundingRate.avgRate7dApr >= 0 ? '+' : ''}{formatNumber(position.fundingRate.avgRate7dApr, 2)}%
+                                </p>
+                                <p className={`text-xs mt-1 ${
+                                  position.fundingRate.currentRateApr > position.fundingRate.avgRate7dApr
+                                    ? 'text-emerald-600 dark:text-emerald-400'
+                                    : position.fundingRate.currentRateApr < position.fundingRate.avgRate7dApr
+                                    ? 'text-rose-600 dark:text-rose-400'
+                                    : 'text-slate-500 dark:text-slate-400'
+                                }`}>
+                                  {position.fundingRate.currentRateApr > position.fundingRate.avgRate7dApr
+                                    ? '↑ Above average'
+                                    : position.fundingRate.currentRateApr < position.fundingRate.avgRate7dApr
+                                    ? '↓ Below average'
+                                    : '→ At average'}
+                                </p>
+                              </div>
+                            </div>
+
+                            {/* Estimated Revenue */}
+                            <div className="grid grid-cols-2 gap-4">
+                              <div className="bg-emerald-50/50 dark:bg-emerald-950/20 rounded-lg p-4 border border-emerald-200/30 dark:border-emerald-700/30">
+                                <p className="text-xs text-emerald-700 dark:text-emerald-400 font-medium mb-1">Est. Daily Revenue</p>
+                                <p className="text-xl font-bold text-emerald-600 dark:text-emerald-400">
+                                  +{formatCurrency(position.fundingRate.estimatedDailyRevenue)}
+                                </p>
+                              </div>
+                              <div className="bg-emerald-50/50 dark:bg-emerald-950/20 rounded-lg p-4 border border-emerald-200/30 dark:border-emerald-700/30">
+                                <p className="text-xs text-emerald-700 dark:text-emerald-400 font-medium mb-1">Est. Monthly Revenue</p>
+                                <p className="text-xl font-bold text-emerald-600 dark:text-emerald-400">
+                                  +{formatCurrency(position.fundingRate.estimatedMonthlyRevenue)}
+                                </p>
+                              </div>
+                            </div>
+
+                            {/* Next Funding Time */}
+                            <div className="bg-slate-50 dark:bg-slate-900/50 rounded-lg p-4 border border-slate-200 dark:border-slate-700">
+                              <div className="flex justify-between items-center">
+                                <span className="text-sm text-slate-600 dark:text-slate-400 font-medium">Next Funding</span>
+                                <span className="text-sm font-bold text-slate-900 dark:text-white">
+                                  {(() => {
+                                    const now = Date.now();
+                                    const diff = position.fundingRate.nextFundingTime - now;
+                                    const hours = Math.floor(diff / (1000 * 60 * 60));
+                                    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+                                    return `${hours}h ${minutes}m`;
+                                  })()}
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Funding Rate Trend (Mini Chart) */}
+                            {position.fundingRate.history.length > 0 && (
+                              <div>
+                                <p className="text-xs text-slate-500 dark:text-slate-400 mb-3 font-medium">7-Day Funding Rate Trend (APR %, 8h Avg)</p>
+                                <div className="h-24">
+                                  {(() => {
+                                    const history = position.fundingRate.history;
+                                    
+                                    // 1. Aggregate data
+                                    const aggregatedHistory = [];
+                                    const groupSize = 8;
+                                    for (let i = 0; i < history.length; i += groupSize) {
+                                      const group = history.slice(i, i + groupSize);
+                                      if (group.length > 0) {
+                                        const avgRateApr = group.reduce((sum, h) => sum + h.rateApr, 0) / group.length;
+                                        aggregatedHistory.push({ time: group[0].time, rateApr: avgRateApr });
+                                      }
+                                    }
+
+                                    // 2. SVG and Axis Setup
+                                    const yAxisWidth = 35;
+                                    const xAxisHeight = 20;
+                                    const svgWidth = 400;
+                                    const svgHeight = 96;
+                                    const chartWidth = svgWidth - yAxisWidth;
+                                    const chartHeight = svgHeight - xAxisHeight;
+                                    const barGap = 2;
+                                    const barWidth = aggregatedHistory.length > 0 ? (chartWidth - (aggregatedHistory.length - 1) * barGap) / aggregatedHistory.length : 0;
+
+                                    const hasNegativeRates = aggregatedHistory.some(h => h.rateApr < 0);
+
+                                    if (hasNegativeRates) {
+                                      // BIPOLAR CHART (Positive and Negative)
+                                      const maxAbsRate = Math.max(...aggregatedHistory.map(x => Math.abs(x.rateApr)), 0);
+                                      const yZero = chartHeight / 2;
+
+                                      return (
+                                        <svg width="100%" height={svgHeight} viewBox={`0 0 ${svgWidth} ${svgHeight}`} preserveAspectRatio="none">
+                                          {/* Y-axis */}
+                                          <g className="y-axis text-[10px] fill-slate-500 dark:fill-slate-400">
+                                            <text x={yAxisWidth - 5} y={10} textAnchor="end">{maxAbsRate.toFixed(1)}%</text>
+                                            <text x={yAxisWidth - 5} y={yZero} textAnchor="end" dy="0.3em">0%</text>
+                                            <text x={yAxisWidth - 5} y={chartHeight - 10} textAnchor="end">-{maxAbsRate.toFixed(1)}%</text>
+                                            <line x1={yAxisWidth} y1={yZero} x2={svgWidth} y2={yZero} className="stroke-slate-200 dark:stroke-slate-700" strokeWidth="1" strokeDasharray="2,2" />
+                                          </g>
+                                          {/* Chart Bars */}
+                                          <g transform={`translate(${yAxisWidth}, 0)`}>
+                                            {aggregatedHistory.map((h, i) => {
+                                              const rate = h.rateApr;
+                                              const barHeight = maxAbsRate > 0 ? (Math.abs(rate) / maxAbsRate) * yZero : 0;
+                                              const isPositive = rate >= 0;
+                                              const x = i * (barWidth + barGap);
+                                              const y = isPositive ? yZero - barHeight : yZero;
+                                              return (
+                                                <rect key={i} x={x} y={y} width={barWidth} height={barHeight} className={isPositive ? 'fill-emerald-500' : 'fill-rose-500'}>
+                                                  <title>{`${new Date(h.time).toLocaleString()}: ${h.rateApr.toFixed(2)}% APR (8h avg)`}</title>
+                                                </rect>
+                                              );
+                                            })}
+                                          </g>
+                                          {/* X-axis */}
+                                          <g className="x-axis text-[10px] fill-slate-500 dark:fill-slate-400" transform={`translate(${yAxisWidth}, ${chartHeight})`}>
+                                            {['7d', '6d', '5d', '4d', '3d', '2d', '1d'].map((label, i) => (
+                                              <text key={i} x={(i * 3 + 1.5) * (barWidth + barGap) - (barGap / 2)} y={15} textAnchor="middle">{label}</text>
+                                            ))}
+                                          </g>
+                                        </svg>
+                                      );
+                                    } else {
+                                      // UNIPOLAR CHART (Only Positive)
+                                      const maxRate = Math.max(...aggregatedHistory.map(x => x.rateApr), 0);
+                                      return (
+                                        <svg width="100%" height={svgHeight} viewBox={`0 0 ${svgWidth} ${svgHeight}`} preserveAspectRatio="none">
+                                          {/* Y-axis */}
+                                          <g className="y-axis text-[10px] fill-slate-500 dark:fill-slate-400">
+                                            <text x={yAxisWidth - 5} y={10} textAnchor="end">{maxRate.toFixed(1)}%</text>
+                                            <text x={yAxisWidth - 5} y={chartHeight} textAnchor="end" dy="-2">{maxRate > 0 ? '0%' : ''}</text>
+                                          </g>
+                                          {/* Chart Bars */}
+                                          <g transform={`translate(${yAxisWidth}, 0)`}>
+                                            {aggregatedHistory.map((h, i) => {
+                                              const rate = h.rateApr;
+                                              const barHeight = maxRate > 0 ? (rate / maxRate) * chartHeight : 0;
+                                              const x = i * (barWidth + barGap);
+                                              const y = chartHeight - barHeight;
+                                              return (
+                                                <rect key={i} x={x} y={y} width={barWidth} height={barHeight} className="fill-emerald-500">
+                                                  <title>{`${new Date(h.time).toLocaleString()}: ${h.rateApr.toFixed(2)}% APR (8h avg)`}</title>
+                                                </rect>
+                                              );
+                                            })}
+                                          </g>
+                                          {/* X-axis */}
+                                          <g className="x-axis text-[10px] fill-slate-500 dark:fill-slate-400" transform={`translate(${yAxisWidth}, ${chartHeight})`}>
+                                            {['7d', '6d', '5d', '4d', '3d', '2d', '1d'].map((label, i) => (
+                                              <text key={i} x={(i * 3 + 1.5) * (barWidth + barGap) - (barGap / 2)} y={15} textAnchor="middle">{label}</text>
+                                            ))}
+                                          </g>
+                                        </svg>
+                                      );
+                                    }
+                                  })()}
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Alert Status */}
+                            {position.fundingRate.currentRateApr < 8 && (
+                              <div className="bg-amber-50/50 dark:bg-amber-950/20 border border-amber-500/30 rounded-lg p-4 flex items-start gap-3">
+                                <svg className="w-5 h-5 text-amber-600 dark:text-amber-400 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                                  <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd"/>
+                                </svg>
+                                <div>
+                                  <p className="text-sm font-semibold text-amber-800 dark:text-amber-300">Low Funding Rate Alert</p>
+                                  <p className="text-xs text-amber-700 dark:text-amber-400 mt-1">
+                                    Funding rate is below 8% APR threshold. Consider closing position if rate continues to decline.
+                                  </p>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* SECTION 2: Position Overview */}
                       <div className="space-y-4">
                         <div className="flex items-center gap-2 mb-4">
                           <svg className="w-5 h-5 text-sky-600 dark:text-sky-400" fill="currentColor" viewBox="0 0 20 20">
@@ -495,7 +777,7 @@ export default function HyperliquidPage() {
                         </div>
                       </div>
 
-                      {/* SECTION 2: Revenue & Fees Breakdown */}
+                      {/* SECTION 3: Revenue & Fees Breakdown */}
                       <div className="space-y-4">
                         <div className="flex items-center gap-2 mb-4">
                           <svg className="w-5 h-5 text-emerald-600 dark:text-emerald-400" fill="currentColor" viewBox="0 0 20 20">
@@ -586,7 +868,7 @@ export default function HyperliquidPage() {
                         </div>
                       </div>
 
-                      {/* SECTION 3: Price Analysis */}
+                      {/* SECTION 4: Price Analysis */}
                       <div className="space-y-4">
                         <div className="flex items-center gap-2 mb-4">
                           <svg className="w-5 h-5 text-violet-600 dark:text-violet-400" fill="currentColor" viewBox="0 0 20 20">
@@ -631,7 +913,7 @@ export default function HyperliquidPage() {
                         </div>
                       </div>
 
-                      {/* SECTION 4: Delta Neutral Action (if not neutral) */}
+                      {/* SECTION 5: Delta Neutral Action (if not neutral) */}
                       {!position.isDeltaNeutral && position.deltaNeutralAction && (
                         <div className="space-y-4">
                           <div className="flex items-center gap-2 mb-4">
