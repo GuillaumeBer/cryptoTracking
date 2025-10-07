@@ -9,6 +9,7 @@ import {
   HyperliquidPriceData,
   HyperliquidSpotState,
   HyperliquidFundingItem,
+  HyperliquidUserFill,
 } from '../types/hyperliquid';
 
 const router = express.Router();
@@ -32,11 +33,20 @@ interface HyperliquidPosition {
   leverage: number;
   distanceToLiquidation: number; // percentage
   distanceToLiquidationUsd: number;
-  fundingPnl?: number; // Total funding earned/paid
+  fundingPnl?: number; // Total funding earned/paid (all time)
+  currentSessionFunding?: number; // Funding for current 8-hour session
   spotBalance?: number; // Spot balance from wallet/binance
   isDeltaNeutral?: boolean; // Whether position is matched with spot
-  deltaImbalance?: number; // Difference between short and spot
+  deltaImbalance?: number; // Difference between short and spot (in coins)
+  deltaImbalanceValue?: number; // Value of imbalance in USD
   deltaNeutralAction?: DeltaNeutralAction; // Recommendation to reach delta neutral
+  hyperliquidFees?: number; // Total fees paid on Hyperliquid (all time)
+  binanceEquivalentFees?: number; // Estimated Binance SPOT fees for equivalent trades
+  totalFees?: number; // Total fees (Hyperliquid + Binance equivalent)
+  futureClosingFees?: number; // Estimated fees to close both positions
+  netGain?: number; // Net gain after all fees and imbalance: fundingPnl - totalFees - futureClosingFees
+  netGainAdjusted?: number; // Net gain adjusted for delta imbalance exposure
+  tradeCount?: number; // Number of trades executed
 }
 
 
@@ -146,6 +156,49 @@ router.get('/', async (req: Request, res: Response) => {
     // Filter only short positions (negative size)
     const shortPositions = positions.filter(p => p.positionSize < 0);
 
+    // Fetch trade history (userFills) to calculate fees
+    const fillsResponse = await fetch('https://api.hyperliquid.xyz/info', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        type: 'userFills',
+        user: address,
+      }),
+    });
+
+    const hyperliquidFeesByCoin: { [coin: string]: number } = {};
+    const binanceFeesByCoin: { [coin: string]: number } = {};
+    const tradeCountByCoin: { [coin: string]: number } = {};
+    const BINANCE_SPOT_FEE_RATE = 0.001; // 0.1% standard rate
+
+    if (fillsResponse.ok) {
+      const fills = (await fillsResponse.json()) as HyperliquidUserFill[];
+
+      fills.forEach((fill) => {
+        const coin = fill.coin;
+        const hyperliquidFee = parseFloat(fill.fee || '0');
+        const builderFee = parseFloat(fill.builderFee || '0');
+        const totalHyperliquidFee = hyperliquidFee + builderFee;
+
+        // Calculate trade value in USDC
+        const tradeValue = parseFloat(fill.px) * parseFloat(fill.sz);
+        const binanceFee = tradeValue * BINANCE_SPOT_FEE_RATE;
+
+        // Accumulate fees by coin
+        if (!hyperliquidFeesByCoin[coin]) {
+          hyperliquidFeesByCoin[coin] = 0;
+          binanceFeesByCoin[coin] = 0;
+          tradeCountByCoin[coin] = 0;
+        }
+
+        hyperliquidFeesByCoin[coin] += totalHyperliquidFee;
+        binanceFeesByCoin[coin] += binanceFee;
+        tradeCountByCoin[coin]++;
+      });
+    }
+
     // Fetch funding history
     const fundingResponse = await fetch('https://api.hyperliquid.xyz/info', {
       method: 'POST',
@@ -161,29 +214,54 @@ router.get('/', async (req: Request, res: Response) => {
 
     let totalFundingPnl = 0;
     const fundingByCoin: { [coin: string]: number } = {};
+    const currentSessionFundingByCoin: { [coin: string]: number } = {};
 
     if (fundingResponse.ok) {
       const fundingData = (await fundingResponse.json()) as HyperliquidFundingItem[];
 
-      // Calculate total funding PnL per coin
+      // Hyperliquid funding occurs every 8 hours
+      const eightHoursAgo = Date.now() - (8 * 60 * 60 * 1000);
+
+      // Calculate total funding PnL per coin (all time) and current session (last 8 hours)
       fundingData.forEach((item) => {
         if (item.delta.type === 'funding') {
           const coin = item.delta.coin;
           const fundingAmount = parseFloat(item.delta.usdc);
+          const fundingTime = item.time;
 
+          // All-time funding
           if (!fundingByCoin[coin]) {
             fundingByCoin[coin] = 0;
           }
           fundingByCoin[coin] += fundingAmount;
           totalFundingPnl += fundingAmount;
+
+          // Current session (last 8 hours)
+          if (fundingTime > eightHoursAgo) {
+            if (!currentSessionFundingByCoin[coin]) {
+              currentSessionFundingByCoin[coin] = 0;
+            }
+            currentSessionFundingByCoin[coin] += fundingAmount;
+          }
         }
       });
 
       // Add funding PnL to positions
       shortPositions.forEach((position) => {
         position.fundingPnl = fundingByCoin[position.coin] || 0;
+        position.currentSessionFunding = currentSessionFundingByCoin[position.coin] || 0;
       });
     }
+
+    // Add fee data to each position (net gain will be calculated later with spot balances)
+    shortPositions.forEach((position) => {
+      const coin = position.coin;
+
+      position.hyperliquidFees = hyperliquidFeesByCoin[coin] || 0;
+      position.binanceEquivalentFees = binanceFeesByCoin[coin] || 0;
+      position.totalFees = position.hyperliquidFees + position.binanceEquivalentFees;
+      position.tradeCount = tradeCountByCoin[coin] || 0;
+    });
 
     // Fetch spot balances from Hyperliquid wallet
     const spotResponse = await fetch('https://api.hyperliquid.xyz/info', {
@@ -211,10 +289,10 @@ router.get('/', async (req: Request, res: Response) => {
       }
     }
 
-    // Fetch spot balances from Binance and merge
+    // Fetch ONLY redeemable Flexible Earn balances from Binance (excludes Spot and Locked)
     if (binanceService.isConfigured()) {
       try {
-        const binanceBalances = await binanceService.getSpotBalances();
+        const binanceBalances = await binanceService.getRedeemableEarnBalances();
 
         // Merge Binance balances with Hyperliquid balances
         Object.keys(binanceBalances).forEach((coin) => {
@@ -225,7 +303,7 @@ router.get('/', async (req: Request, res: Response) => {
           }
         });
 
-        console.log(`✅ Merged Binance balances with Hyperliquid balances`);
+        console.log(`✅ Merged Binance redeemable Flexible Earn balances with Hyperliquid balances`);
       } catch (error) {
         console.error('Error fetching Binance balances:', error);
         // Continue without Binance balances if there's an error
@@ -307,7 +385,7 @@ router.get('/', async (req: Request, res: Response) => {
     }
     */
 
-    // Match positions with spot balances for delta neutral detection
+    // Match positions with spot balances for delta neutral detection and calculate adjusted net gain
     shortPositions.forEach((position) => {
       const spotBalance = spotBalances[position.coin] || 0;
       position.spotBalance = spotBalance;
@@ -315,10 +393,35 @@ router.get('/', async (req: Request, res: Response) => {
       const shortSize = Math.abs(position.positionSize);
       position.deltaImbalance = shortSize - spotBalance;
 
+      // Calculate value of imbalance in USD
+      position.deltaImbalanceValue = Math.abs(position.deltaImbalance) * position.markPrice;
+
       // Consider delta neutral if difference is less than 5%
       const maxSize = Math.max(shortSize, spotBalance);
       const imbalancePercent = maxSize > 0 ? (Math.abs(position.deltaImbalance) / maxSize) * 100 : 0;
       position.isDeltaNeutral = maxSize > 0 && imbalancePercent < 5;
+
+      // Calculate future closing fees
+      // Hyperliquid: Assume 0.05% taker fee to close short
+      const hyperliquidClosingFee = position.positionValueUsd * 0.0005;
+      // Binance: 0.1% to sell spot position
+      const binanceClosingFee = (spotBalance * position.markPrice) * 0.001;
+      position.futureClosingFees = hyperliquidClosingFee + binanceClosingFee;
+
+      // Calculate adjusted net gain
+      // If more short than spot (positive deltaImbalance): we have unhedged short exposure (bearish exposure)
+      // If more spot than long (negative deltaImbalance): we have unhedged long exposure (bullish exposure)
+      // We don't directly subtract imbalance value as it's not a realized loss, but it's a risk exposure
+
+      // Net gain considering all fees (past + future)
+      const fundingRevenue = position.fundingPnl || 0;
+      const totalHistoricalFees = position.totalFees || 0;
+      position.netGain = fundingRevenue - totalHistoricalFees - position.futureClosingFees;
+
+      // Adjusted net gain: Consider the imbalance as a risk factor
+      // For a conservative estimate, we can consider the imbalance value as potential exposure
+      // However, since it's not a realized P&L, we'll keep it separate for now
+      position.netGainAdjusted = position.netGain;
 
       // Generate recommendation if not delta neutral
       if (!position.isDeltaNeutral && maxSize > 0) {

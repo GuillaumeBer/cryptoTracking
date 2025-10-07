@@ -1,19 +1,24 @@
 import express, { Request, Response } from 'express';
-import fetch from 'node-fetch';
 import { priceService } from '../services/price-api';
 
 const router = express.Router();
 
-// AAVE V3 Subgraph endpoints
-const GRAPH_API_KEY = process.env.GRAPH_API_KEY || '';
+// AAVE V3 Subgraph endpoints - Function to get URLs with API key at runtime
+function getAaveSubgraphs() {
+  const GRAPH_API_KEY = process.env.GRAPH_API_KEY || '';
 
-const AAVE_SUBGRAPHS = {
-  arbitrum: `https://gateway-arbitrum.network.thegraph.com/api/${GRAPH_API_KEY}/subgraphs/id/DLuE98kEb5pQNXAcKFQGQgfSQ57Xdou4jnVbAEqMfy3B`,
-  base: `https://gateway-arbitrum.network.thegraph.com/api/${GRAPH_API_KEY}/subgraphs/id/GQFbb95cE6d8mV989mL5figjaGaKCQB3xqYrr1bRyXqF`,
-  avalanche: `https://gateway-arbitrum.network.thegraph.com/api/${GRAPH_API_KEY}/subgraphs/id/2h9woxy8RTjHu1HJsCEnmzpPHFArU33avmUh4f71JpVn`,
-  bnb: `https://gateway-arbitrum.network.thegraph.com/api/${GRAPH_API_KEY}/subgraphs/id/7Jk85XgkV1MQ7u56hD8rr65rfASbayJXopugWkUoBMnZ`,
-  sonic: `https://gateway-arbitrum.network.thegraph.com/api/${GRAPH_API_KEY}/subgraphs/id/FQcacc4ZJaQVS9euWb76nvpSq2GxavBnUM6DU6tmspbi`,
-};
+  if (!GRAPH_API_KEY) {
+    console.warn('WARNING: GRAPH_API_KEY is not set. AAVE queries will fail.');
+  }
+
+  return {
+    arbitrum: `https://gateway-arbitrum.network.thegraph.com/api/${GRAPH_API_KEY}/subgraphs/id/DLuE98kEb5pQNXAcKFQGQgfSQ57Xdou4jnVbAEqMfy3B`,
+    base: `https://gateway-arbitrum.network.thegraph.com/api/${GRAPH_API_KEY}/subgraphs/id/GQFbb95cE6d8mV989mL5figjaGaKCQB3xqYrr1bRyXqF`,
+    avalanche: `https://gateway-arbitrum.network.thegraph.com/api/${GRAPH_API_KEY}/subgraphs/id/2h9woxy8RTjHu1HJsCEnmzpPHFArU33avmUh4f71JpVn`,
+    bnb: `https://gateway-arbitrum.network.thegraph.com/api/${GRAPH_API_KEY}/subgraphs/id/7Jk85XgkV1MQ7u56hD8rr65rfASbayJXopugWkUoBMnZ`,
+    sonic: `https://gateway-arbitrum.network.thegraph.com/api/${GRAPH_API_KEY}/subgraphs/id/FQcacc4ZJaQVS9euWb76nvpSq2GxavBnUM6DU6tmspbi`,
+  };
+}
 
 // Chain IDs
 const CHAIN_IDS = {
@@ -77,6 +82,7 @@ async function fetchAaveData(walletAddress: string, subgraphUrl: string): Promis
   `;
 
   try {
+    console.log(`[AAVE] Fetching data for ${walletAddress} from ${subgraphUrl.substring(0, 80)}...`);
     const response = await fetch(subgraphUrl, {
       method: 'POST',
       headers: {
@@ -96,6 +102,7 @@ async function fetchAaveData(walletAddress: string, subgraphUrl: string): Promis
     }
 
     const data: any = await response.json();
+    console.log(`[AAVE] Response data:`, JSON.stringify(data).substring(0, 200));
 
     if (data.errors) {
       console.error(`GraphQL errors: ${JSON.stringify(data.errors)}`);
@@ -104,16 +111,24 @@ async function fetchAaveData(walletAddress: string, subgraphUrl: string): Promis
 
     // Transform to match expected structure
     if (data.data.userReserves) {
+      console.log(`AAVE data for ${walletAddress}: Found ${data.data.userReserves.length} reserves`);
       return {
         id: walletAddress,
         reserves: data.data.userReserves
       };
     }
 
+    console.log(`AAVE data for ${walletAddress}: No reserves found`);
     return null;
   } catch (error) {
     console.error('Error fetching AAVE data:', error);
-    return null;
+    console.error('Error details:', {
+      message: error instanceof Error ? error.message : 'Unknown',
+      stack: error instanceof Error ? error.stack : 'No stack',
+      walletAddress,
+      subgraphUrl: subgraphUrl.substring(0, 100),
+    });
+    throw error; // Re-throw to see the error in the response
   }
 }
 
@@ -129,10 +144,16 @@ async function calculateUSDValue(amount: string, decimals: number, symbol: strin
 
 // Helper function to process positions
 async function processPositions(userData: AaveUser | null) {
-  if (!userData?.reserves) return [];
+  if (!userData?.reserves) {
+    console.log('processPositions: No userData or reserves');
+    return [];
+  }
+
+  console.log(`processPositions: Processing ${userData.reserves.length} reserves`);
 
   // Separate borrowed positions and collateral positions
   const borrowedReserves = userData.reserves.filter(r => parseFloat(r.currentTotalDebt) > 0);
+  console.log(`processPositions: Found ${borrowedReserves.length} borrowed reserves`);
   const collateralReserves = userData.reserves.filter(r =>
     parseFloat(r.currentATokenBalance) > 0 && r.usageAsCollateralEnabledOnUser
   );
@@ -143,7 +164,18 @@ async function processPositions(userData: AaveUser | null) {
   borrowedReserves.forEach(r => allSymbols.add(r.reserve.symbol));
 
   // Batch fetch all prices at once using centralized price service
-  const prices = await priceService.getTokenPrices(Array.from(allSymbols));
+  let prices: Record<string, { price: number; source: string }> = {};
+  try {
+    console.log(`processPositions: Fetching prices for symbols:`, Array.from(allSymbols));
+    prices = await priceService.getTokenPrices(Array.from(allSymbols));
+    console.log(`processPositions: Got prices:`, Object.keys(prices));
+  } catch (error) {
+    console.error(`processPositions: Error fetching prices:`, error);
+    // Provide default prices if fetch fails
+    allSymbols.forEach(symbol => {
+      prices[symbol] = { price: 1, source: 'error-fallback' };
+    });
+  }
 
   // Calculate collateral assets with pre-fetched prices and liquidation thresholds
   const collateralAssets = collateralReserves.map(reserve => {
@@ -223,6 +255,7 @@ async function processPositions(userData: AaveUser | null) {
 router.get('/', async (req: Request, res: Response) => {
   try {
     const walletAddress = req.query.address as string;
+    console.log(`[AAVE ROUTE] Request received for address: ${walletAddress}`);
 
     if (!walletAddress) {
       res.status(400).json({
@@ -232,6 +265,9 @@ router.get('/', async (req: Request, res: Response) => {
       return;
     }
 
+    // Get subgraph URLs with API key
+    const AAVE_SUBGRAPHS = getAaveSubgraphs();
+
     // Fetch data from all chains in parallel
     const [arbitrumUser, baseUser, avalancheUser, bnbUser, sonicUser] = await Promise.all([
       fetchAaveData(walletAddress, AAVE_SUBGRAPHS.arbitrum),
@@ -240,6 +276,8 @@ router.get('/', async (req: Request, res: Response) => {
       fetchAaveData(walletAddress, AAVE_SUBGRAPHS.bnb),
       fetchAaveData(walletAddress, AAVE_SUBGRAPHS.sonic),
     ]);
+
+    console.log('[AAVE] Arbitrum user reserves count:', arbitrumUser?.reserves?.length || 0);
 
     // Process positions for all chains in parallel
     const [arbitrumPositions, basePositions, avalanchePositions, bnbPositions, sonicPositions] = await Promise.all([
@@ -282,9 +320,11 @@ router.get('/', async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('Error fetching AAVE positions:', error);
+    console.error('Error stack:', error instanceof Error ? error.stack : 'No stack trace');
     res.status(500).json({
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error occurred',
+      stack: error instanceof Error ? error.stack : undefined,
     });
   }
 });

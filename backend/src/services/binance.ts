@@ -129,7 +129,7 @@ export class BinanceService {
 
     try {
       // Fetch Flexible Earn products
-      const flexibleResponse = await this.client.simpleEarnFlexiblePosition();
+      const flexibleResponse = await this.client.getFlexibleProductPosition();
 
       if (flexibleResponse.data && flexibleResponse.data.rows) {
         flexibleResponse.data.rows.forEach((position: any) => {
@@ -150,16 +150,19 @@ export class BinanceService {
 
     try {
       // Fetch Locked Earn products
-      const lockedResponse = await this.client.simpleEarnLockedPosition();
+      const lockedResponse = await this.client.getLockedProductPosition();
 
       if (lockedResponse.data && lockedResponse.data.rows) {
         lockedResponse.data.rows.forEach((position: any) => {
           const rawAsset = position.asset;
           const asset = normalizeAssetName(rawAsset);
-          const amount = parseFloat(position.amount || '0');
-          if (amount > 0) {
-            balances[asset] = (balances[asset] || 0) + amount;
-            detailedLog.push(`  Locked: ${rawAsset} → ${asset}: ${amount}`);
+          const principal = parseFloat(position.amount || '0');
+          const rewards = parseFloat(position.rewardAmt || '0');
+          const totalAmount = principal + rewards;
+
+          if (totalAmount > 0) {
+            balances[asset] = (balances[asset] || 0) + totalAmount;
+            detailedLog.push(`  Locked: ${rawAsset} → ${asset}: ${totalAmount} (principal: ${principal}, rewards: ${rewards})`);
           }
         });
       }
@@ -279,10 +282,88 @@ export class BinanceService {
   }
 
   /**
-   * Fetch spot account balances from Binance (legacy method - now calls getAllBalances)
+   * Fetch ONLY redeemable Flexible Earn balances
+   * Excludes Spot wallet and Locked Earn products
+   * Use this for assets that can be redeemed but are currently earning
+   */
+  async getRedeemableEarnBalances(): Promise<SpotBalances> {
+    if (!this.client) {
+      console.warn('Binance client not initialized, returning empty balances');
+      return {};
+    }
+
+    const balances: SpotBalances = {};
+
+    try {
+      // Fetch ONLY Flexible Earn products (can be redeemed anytime)
+      // Use size: 100 to get all positions in one call
+      const flexibleResponse = await this.client.getFlexibleProductPosition({ size: 100 });
+
+      if (flexibleResponse.data && flexibleResponse.data.rows) {
+        flexibleResponse.data.rows.forEach((position: any) => {
+          if (position.canRedeem) {
+            const rawAsset = position.asset;
+            const asset = normalizeAssetName(rawAsset);
+            const amount = parseFloat(position.totalAmount || '0');
+            if (amount > 0) {
+              balances[asset] = (balances[asset] || 0) + amount;
+            }
+          }
+        });
+      }
+
+      console.log(`✅ Fetched ${Object.keys(balances).length} redeemable Flexible Earn balances`);
+      return balances;
+    } catch (error: any) {
+      console.error('Error fetching redeemable Earn balances:', error.response?.data || error.message);
+      return {};
+    }
+  }
+
+  /**
+   * Fetch ONLY spot wallet balances (excludes Earn products)
+   * Use this for delta-neutral calculations where only liquid balances matter
    */
   async getSpotBalances(): Promise<SpotBalances> {
-    return this.getAllBalances();
+    if (!this.client) {
+      console.warn('Binance client not initialized, returning empty balances');
+      return {};
+    }
+
+    const spotBalances: SpotBalances = {};
+
+    try {
+      let spotResponse;
+
+      if (this.useHmac) {
+        spotResponse = await this.client.account();
+      } else {
+        const timestamp = Date.now();
+        const queryString = `timestamp=${timestamp}`;
+        const signature = this.signRequest(queryString);
+
+        spotResponse = await this.client.account({
+          timestamp,
+          signature,
+        });
+      }
+
+      if (spotResponse.data && spotResponse.data.balances) {
+        spotResponse.data.balances.forEach((balance: BinanceBalance) => {
+          const total = parseFloat(balance.free) + parseFloat(balance.locked);
+          if (total > 0) {
+            const normalizedAsset = normalizeAssetName(balance.asset);
+            spotBalances[normalizedAsset] = (spotBalances[normalizedAsset] || 0) + total;
+          }
+        });
+      }
+
+      console.log(`✅ Fetched ${Object.keys(spotBalances).length} Binance SPOT-ONLY balances (excludes Earn)`);
+      return spotBalances;
+    } catch (error: any) {
+      console.error('Error fetching Binance spot balances:', error.response?.data || error.message);
+      return {};
+    }
   }
 
   /**
@@ -307,6 +388,14 @@ export const binanceService = {
   // Proxy methods
   async getSpotBalances() {
     return this.getInstance().getSpotBalances();
+  },
+
+  async getAllBalances() {
+    return this.getInstance().getAllBalances();
+  },
+
+  async getRedeemableEarnBalances() {
+    return this.getInstance().getRedeemableEarnBalances();
   },
 
   isConfigured() {

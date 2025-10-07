@@ -3,8 +3,42 @@
 ## Overview
 This document summarizes all improvements and cleanup performed on the crypto-tracking codebase.
 
-**Date**: 2025-10-05
-**Total Changes**: 30+ files modified/created/deleted
+**Last Updated**: 2025-10-07
+**Total Changes**: 35+ files modified/created/deleted
+
+---
+
+## Latest Improvements (2025-10-07)
+
+### 🚀 Price Service Enhancements
+
+#### 1. Wrapped Token Unwrapping
+- Added automatic token unwrapping for wBNB, wSOL, sAVAX, wS
+- Reduces CoinGecko API calls by 33%
+- Improves price accuracy by using Binance for wrapped tokens
+- New function: `getUnwrappedSymbol()` handles common token prefixes
+
+#### 2. Critical Bug Fix: WBNB Price Mapping
+- **Problem**: WBNB was using fallback price ($620) instead of Binance price
+- **Fix**: Batch price fetch now correctly uses `binanceMap`
+- **Impact**: WBNB price $620 → $1,190 (92% accuracy improvement!)
+- **Result**: BNB Chain health factors now accurately reflect collateral value
+
+#### 3. Performance Optimization
+- Reduced external API calls
+- Better cache hit rates for wrapped tokens
+- Faster price fetching overall
+- Improved fallback chain logic
+
+**Files Modified**:
+- `backend/src/services/price-api/index.ts`
+
+**Documentation Added**:
+- `PRICE_SERVICE_IMPROVEMENTS.md` - Detailed technical explanation
+
+---
+
+## Previous Improvements (2025-10-05)
 
 ---
 

@@ -15,28 +15,38 @@ interface HyperliquidPosition {
   entryPrice: number;
   markPrice: number;
   liquidationPrice: number;
-  positionSize: number; // negative for shorts
+  positionSize: number;
   positionValueUsd: number;
   unrealizedPnl: number;
   unrealizedPnlPercent: number;
   margin: number;
   leverage: number;
-  distanceToLiquidation: number; // percentage
+  distanceToLiquidation: number;
   distanceToLiquidationUsd: number;
   fundingPnl?: number;
+  currentSessionFunding?: number;
   spotBalance?: number;
   isDeltaNeutral?: boolean;
   deltaImbalance?: number;
+  deltaImbalanceValue?: number;
   deltaNeutralAction?: DeltaNeutralAction;
+  hyperliquidFees?: number;
+  binanceEquivalentFees?: number;
+  totalFees?: number;
+  futureClosingFees?: number;
+  netGain?: number;
+  netGainAdjusted?: number;
+  tradeCount?: number;
 }
 
 export default function HyperliquidPage() {
-  const [walletAddress, setWalletAddress] = useState('');
+  const [walletAddress, setWalletAddress] = useState(process.env.NEXT_PUBLIC_DEFAULT_EVM_ADDRESS || '');
   const [positions, setPositions] = useState<HyperliquidPosition[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const [totalFundingPnl, setTotalFundingPnl] = useState(0);
+  const [totalNetGain, setTotalNetGain] = useState(0);
 
   const fetchPositions = async () => {
     if (!walletAddress) {
@@ -52,8 +62,14 @@ export default function HyperliquidPage() {
       const result = await response.json();
 
       if (result.success) {
-        setPositions(result.data.positions || []);
+        const positionsData = result.data.positions || [];
+        setPositions(positionsData);
         setTotalFundingPnl(result.data.totalFundingPnl || 0);
+
+        // Calculate total net gain/loss from all positions
+        const totalNet = positionsData.reduce((sum: number, pos: HyperliquidPosition) => sum + (pos.netGain || 0), 0);
+        setTotalNetGain(totalNet);
+
         setLastUpdate(new Date());
       } else {
         setError(result.error || 'Failed to fetch positions');
@@ -91,10 +107,34 @@ export default function HyperliquidPage() {
   };
 
   const getRiskLevel = (distancePercent: number) => {
-    if (distancePercent < 5) return { level: 'critical', color: 'bg-red-600', textColor: 'text-red-600', borderColor: 'border-red-600' };
-    if (distancePercent < 10) return { level: 'high', color: 'bg-orange-500', textColor: 'text-orange-500', borderColor: 'border-orange-500' };
-    if (distancePercent < 20) return { level: 'medium', color: 'bg-yellow-500', textColor: 'text-yellow-500', borderColor: 'border-yellow-500' };
-    return { level: 'safe', color: 'bg-green-500', textColor: 'text-green-500', borderColor: 'border-green-500' };
+    if (distancePercent < 5) return {
+      level: 'critical',
+      color: 'bg-rose-500',
+      textColor: 'text-rose-600 dark:text-rose-400',
+      borderColor: 'border-rose-500/50',
+      bgColor: 'bg-rose-50/50 dark:bg-rose-950/20'
+    };
+    if (distancePercent < 10) return {
+      level: 'high',
+      color: 'bg-amber-500',
+      textColor: 'text-amber-600 dark:text-amber-400',
+      borderColor: 'border-amber-500/50',
+      bgColor: 'bg-amber-50/50 dark:bg-amber-950/20'
+    };
+    if (distancePercent < 20) return {
+      level: 'medium',
+      color: 'bg-yellow-500',
+      textColor: 'text-yellow-600 dark:text-yellow-400',
+      borderColor: 'border-yellow-500/50',
+      bgColor: 'bg-yellow-50/50 dark:bg-yellow-950/20'
+    };
+    return {
+      level: 'safe',
+      color: 'bg-emerald-500',
+      textColor: 'text-emerald-600 dark:text-emerald-400',
+      borderColor: 'border-emerald-500/50',
+      bgColor: 'bg-emerald-50/50 dark:bg-emerald-950/20'
+    };
   };
 
   const totalPositionValue = positions.reduce((sum, pos) => sum + Math.abs(pos.positionValueUsd), 0);
@@ -102,39 +142,64 @@ export default function HyperliquidPage() {
   const deltaNeutralPositions = positions.filter(p => p.isDeltaNeutral);
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 dark:from-[#0a0a0a] dark:to-[#1a1a1a] p-4 sm:p-8">
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-900 p-6 sm:p-8 transition-colors duration-200">
       <div className="max-w-7xl mx-auto">
         {/* Header with Back Button */}
         <div className="mb-8">
-          <Link href="/" className="inline-flex items-center gap-2 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white mb-6 transition-colors">
+          <Link
+            href="/"
+            className="inline-flex items-center gap-2 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 mb-8 transition-colors duration-200"
+          >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
             </svg>
-            Back to Home
+            <span className="text-sm font-medium">Back to Home</span>
           </Link>
 
-          <div className="flex flex-col gap-4 mb-6">
-            <h1 className="text-4xl sm:text-5xl font-bold bg-gradient-to-r from-red-600 to-pink-600 dark:from-red-400 dark:to-pink-400 bg-clip-text text-transparent">
-              Hyperliquid Delta Neutral Strategy
+          <div className="flex flex-col gap-6 mb-8">
+            <h1 className="text-4xl sm:text-5xl font-bold text-slate-900 dark:text-white">
+              Hyperliquid Delta Neutral
             </h1>
+
             {positions.length > 0 && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="bg-gradient-to-br from-white to-gray-50 dark:from-[#1a1a1a] dark:to-[#0f0f0f] border border-gray-200 dark:border-gray-800 rounded-2xl px-6 py-4 shadow-xl">
-                  <p className="text-xs uppercase tracking-wide text-gray-600 dark:text-gray-400 mb-1 font-semibold">Total Position Value</p>
-                  <p className="text-3xl sm:text-4xl font-bold bg-gradient-to-r from-red-600 to-pink-600 dark:from-red-400 dark:to-pink-400 bg-clip-text text-transparent">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {/* Total Position Value Card */}
+                <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-6 shadow-sm hover:shadow-md transition-all duration-200">
+                  <p className="text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">Total Position Value</p>
+                  <p className="text-3xl font-bold text-slate-900 dark:text-white mb-1">
                     ${formatNumber(totalPositionValue)}
                   </p>
-                  <p className={`text-sm mt-1 font-semibold ${totalUnrealizedPnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                    Unrealized PnL: {totalUnrealizedPnl >= 0 ? '+' : ''}{formatCurrency(totalUnrealizedPnl)}
+                  <p className="text-sm text-slate-500 dark:text-slate-400">
+                    Delta Neutral: {deltaNeutralPositions.length}/{positions.length} positions
                   </p>
                 </div>
-                <div className="bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-950/30 dark:to-emerald-950/30 border-2 border-green-500 dark:border-green-600 rounded-2xl px-6 py-4 shadow-xl">
-                  <p className="text-xs uppercase tracking-wide text-green-700 dark:text-green-400 mb-1 font-semibold">Funding PnL (All Time)</p>
-                  <p className={`text-3xl sm:text-4xl font-bold ${totalFundingPnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                    {totalFundingPnl >= 0 ? '+' : ''}{formatCurrency(totalFundingPnl)}
+
+                {/* Net Gain/Loss Card */}
+                <div className={`border rounded-xl p-6 shadow-sm hover:shadow-md transition-all duration-200 ${
+                  totalNetGain >= 0
+                    ? 'bg-emerald-50/50 dark:bg-emerald-950/20 border-emerald-500/30'
+                    : 'bg-rose-50/50 dark:bg-rose-950/20 border-rose-500/30'
+                }`}>
+                  <p className={`text-sm font-medium mb-2 ${
+                    totalNetGain >= 0
+                      ? 'text-emerald-700 dark:text-emerald-400'
+                      : 'text-rose-700 dark:text-rose-400'
+                  }`}>
+                    Total Net {totalNetGain >= 0 ? 'Gain' : 'Loss'} (After Fees)
                   </p>
-                  <p className="text-sm mt-1 font-semibold text-green-700 dark:text-green-400">
-                    Delta Neutral: {deltaNeutralPositions.length}/{positions.length} positions
+                  <p className={`text-3xl font-bold mb-1 ${
+                    totalNetGain >= 0
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : 'text-rose-600 dark:text-rose-400'
+                  }`}>
+                    {totalNetGain >= 0 ? '+' : ''}{formatCurrency(totalNetGain)}
+                  </p>
+                  <p className={`text-sm ${
+                    totalNetGain >= 0
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : 'text-rose-600 dark:text-rose-400'
+                  }`}>
+                    From {positions.length} short position{positions.length !== 1 ? 's' : ''}
                   </p>
                 </div>
               </div>
@@ -142,21 +207,23 @@ export default function HyperliquidPage() {
           </div>
 
           {/* Wallet Input */}
-          <div className="bg-white dark:bg-[#1a1a1a] rounded-2xl shadow-lg p-6 border border-gray-200 dark:border-gray-800">
-            <div className="mb-3">
-              <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-2">Hyperliquid Wallet Address</label>
+          <div className="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 p-6">
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
+                Hyperliquid Wallet Address
+              </label>
               <input
                 type="text"
                 value={walletAddress}
                 onChange={(e) => setWalletAddress(e.target.value)}
                 placeholder="0x..."
-                className="w-full px-4 py-3 rounded-xl border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-[#0f0f0f] text-gray-900 dark:text-white font-mono text-sm focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent transition-all"
+                className="w-full px-4 py-3 rounded-lg border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white font-mono text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent transition-all"
               />
             </div>
             <button
               onClick={fetchPositions}
               disabled={loading}
-              className="w-full px-8 py-3 bg-gradient-to-r from-red-600 to-pink-600 hover:from-red-700 hover:to-pink-700 disabled:from-gray-400 disabled:to-gray-500 text-white font-semibold rounded-xl transition-all shadow-md hover:shadow-lg disabled:cursor-not-allowed"
+              className="w-full px-6 py-3 bg-sky-600 hover:bg-sky-700 disabled:bg-slate-400 dark:disabled:bg-slate-600 text-white font-semibold rounded-lg transition-all duration-200 shadow-sm hover:shadow-md disabled:cursor-not-allowed"
             >
               {loading ? (
                 <span className="flex items-center justify-center gap-2">
@@ -170,7 +237,7 @@ export default function HyperliquidPage() {
             </button>
 
             {lastUpdate && (
-              <div className="flex items-center gap-2 mt-3 text-xs text-gray-500 dark:text-gray-400">
+              <div className="flex items-center gap-2 mt-4 text-xs text-slate-500 dark:text-slate-400">
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
@@ -181,54 +248,53 @@ export default function HyperliquidPage() {
         </div>
 
         {error && (
-          <div className="mb-8 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl shadow-md">
+          <div className="mb-8 p-4 bg-rose-50 dark:bg-rose-950/20 border border-rose-200 dark:border-rose-800 rounded-lg">
             <div className="flex items-center gap-3">
-              <svg className="w-5 h-5 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-5 h-5 text-rose-600 dark:text-rose-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
-              <p className="text-red-800 dark:text-red-300 font-medium">{error}</p>
+              <p className="text-sm text-rose-800 dark:text-rose-300 font-medium">{error}</p>
             </div>
           </div>
         )}
 
         {loading && positions.length === 0 && (
           <div className="text-center py-20">
-            <div className="inline-block animate-spin rounded-full h-16 w-16 border-4 border-gray-200 dark:border-gray-700 border-t-red-600 dark:border-t-red-400"></div>
-            <p className="mt-6 text-lg text-gray-600 dark:text-gray-400 font-medium">Loading positions...</p>
+            <div className="inline-block animate-spin rounded-full h-16 w-16 border-4 border-slate-200 dark:border-slate-700 border-t-sky-600"></div>
+            <p className="mt-6 text-base text-slate-600 dark:text-slate-400 font-medium">Loading positions...</p>
           </div>
         )}
 
         {!loading && positions.length === 0 && walletAddress && !error && (
-          <div className="bg-white dark:bg-[#1a1a1a] rounded-2xl shadow-lg p-12 text-center border border-gray-200 dark:border-gray-800">
-            <svg className="w-16 h-16 mx-auto text-gray-400 dark:text-gray-600 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div className="bg-white dark:bg-slate-800 rounded-xl shadow-sm p-12 text-center border border-slate-200 dark:border-slate-700">
+            <svg className="w-16 h-16 mx-auto text-slate-400 dark:text-slate-600 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
             </svg>
-            <p className="text-lg text-gray-600 dark:text-gray-400 font-medium">No short positions found</p>
-            <p className="text-sm text-gray-500 dark:text-gray-500 mt-2">This address has no active short positions on Hyperliquid</p>
+            <p className="text-base text-slate-700 dark:text-slate-300 font-medium">No short positions found</p>
+            <p className="text-sm text-slate-500 dark:text-slate-400 mt-2">This address has no active short positions on Hyperliquid</p>
           </div>
         )}
 
         {positions.length > 0 && (
-          <div className="space-y-6">
-            <h2 className="text-2xl font-bold text-gray-900 dark:text-white">
+          <div className="space-y-8">
+            <h2 className="text-xl font-bold text-slate-900 dark:text-white">
               {positions.length} Position{positions.length !== 1 ? 's' : ''}
             </h2>
 
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
               {positions.map((position, index) => {
                 const riskLevel = getRiskLevel(position.distanceToLiquidation);
                 const priceChangePercent = ((position.markPrice - position.entryPrice) / position.entryPrice) * 100;
-                // For shorts, calculate how much the price can rise before liquidation
                 const priceToLiquidation = ((position.liquidationPrice - position.markPrice) / position.markPrice) * 100;
 
                 return (
-                  <div
+                  <details
                     key={`${position.coin}-${index}`}
-                    className={`relative bg-gradient-to-br from-white to-gray-50 dark:from-[#1a1a1a] dark:to-[#0f0f0f] border-2 ${riskLevel.borderColor} rounded-2xl overflow-hidden hover:shadow-2xl hover:scale-[1.01] transition-all duration-300`}
+                    className="group relative bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden hover:shadow-lg transition-all duration-300"
                   >
                     {/* Warning Banner for High Risk */}
                     {riskLevel.level === 'critical' && (
-                      <div className="bg-red-600 text-white px-4 py-2 flex items-center gap-2 font-bold text-sm">
+                      <div className="bg-rose-500 text-white px-6 py-3 flex items-center gap-2 font-semibold text-sm">
                         <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
                           <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
                         </svg>
@@ -236,7 +302,7 @@ export default function HyperliquidPage() {
                       </div>
                     )}
                     {riskLevel.level === 'high' && (
-                      <div className="bg-orange-500 text-white px-4 py-2 flex items-center gap-2 font-semibold text-sm">
+                      <div className="bg-amber-500 text-white px-6 py-3 flex items-center gap-2 font-semibold text-sm">
                         <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
                           <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
                         </svg>
@@ -244,224 +310,356 @@ export default function HyperliquidPage() {
                       </div>
                     )}
 
-                    <div className="p-6">
+                    {/* Level 1: Essential Information (Always Visible) */}
+                    <summary className="p-6 cursor-pointer list-none hover:bg-slate-50/50 dark:hover:bg-slate-700/30 transition-colors duration-200">
                       {/* Header */}
-                      <div className="flex justify-between items-start mb-5">
-                        <div>
-                          <div className="flex items-center gap-2 mb-1">
-                            <h3 className="text-3xl font-bold text-gray-900 dark:text-white">
+                      <div className="flex justify-between items-start mb-6">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-3 mb-2">
+                            <h3 className="text-2xl font-bold text-slate-900 dark:text-white">
                               {position.coin}
                             </h3>
-                            <span className="px-2.5 py-1 text-xs font-bold rounded-full bg-red-500 text-white shadow-md">
+                            <span className="px-2.5 py-1 text-xs font-bold rounded-md bg-rose-500/10 text-rose-700 dark:text-rose-400 border border-rose-500/20">
                               SHORT
                             </span>
+                            <svg className="w-5 h-5 text-slate-400 ml-auto transition-transform duration-200 group-open:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                            </svg>
                           </div>
-                          <p className="text-sm font-medium text-gray-500 dark:text-gray-400">{Math.abs(position.leverage)}x Leverage • Margin: {formatCurrency(position.margin)}</p>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Position</p>
-                          <p className="text-2xl font-bold text-gray-900 dark:text-white">
-                            {formatCurrency(position.positionValueUsd)}
+                          <p className="text-sm font-medium text-slate-500 dark:text-slate-400">
+                            {formatCurrency(position.positionValueUsd)} • {Math.abs(position.leverage)}x leverage
                           </p>
                         </div>
                       </div>
 
-                      {/* Liquidation Risk - PROMINENT */}
-                      <div className={`mb-5 p-4 rounded-xl border-2 ${riskLevel.borderColor} ${riskLevel.level === 'critical' ? 'bg-red-50 dark:bg-red-950/30' : riskLevel.level === 'high' ? 'bg-orange-50 dark:bg-orange-950/30' : riskLevel.level === 'medium' ? 'bg-yellow-50 dark:bg-yellow-950/30' : 'bg-green-50 dark:bg-green-950/30'}`}>
+                      {/* Simplified Liquidation Risk */}
+                      <div className={`mb-4 p-5 rounded-lg border ${riskLevel.borderColor} ${riskLevel.bgColor}`}>
                         <div className="flex justify-between items-center mb-3">
-                          <span className="text-sm font-bold uppercase tracking-wide text-gray-700 dark:text-gray-300">Liquidation Risk</span>
-                          <span className={`text-xs font-black uppercase px-3 py-1.5 rounded-full ${riskLevel.color} text-white shadow-lg`}>
+                          <span className="text-sm font-semibold text-slate-700 dark:text-slate-300">Liquidation Risk</span>
+                          <span className={`text-xs font-bold uppercase px-2.5 py-1 rounded-md ${riskLevel.color} text-white`}>
                             {riskLevel.level}
                           </span>
                         </div>
-
-                        {/* Large Liquidation Price Display */}
-                        <div className="mb-3">
-                          <div className="flex items-baseline gap-2">
-                            <span className="text-xs font-semibold text-gray-600 dark:text-gray-400">Liquidation at</span>
-                            <span className={`text-2xl font-black ${riskLevel.textColor}`}>
-                              {formatCurrency(position.liquidationPrice)}
-                            </span>
-                            <span className={`text-lg font-bold ${riskLevel.textColor}`}>
-                              ({priceToLiquidation > 0 ? '+' : ''}{formatNumber(priceToLiquidation, 1)}%)
-                            </span>
-                          </div>
-                          <p className="text-xs text-gray-600 dark:text-gray-400 mt-1">
-                            Price needs to move {formatCurrency(position.distanceToLiquidationUsd)} ({formatNumber(position.distanceToLiquidation, 1)}%)
-                          </p>
-                        </div>
-
-                        {/* Improved Progress Bar - Shows danger level */}
-                        <div className="relative w-full h-8 bg-gray-200 dark:bg-gray-700 rounded-lg overflow-hidden">
-                          {/* Danger zones */}
-                          <div className="absolute inset-0 flex">
-                            <div className="w-[5%] bg-red-600"></div>
-                            <div className="w-[5%] bg-orange-500"></div>
-                            <div className="w-[10%] bg-yellow-500"></div>
-                            <div className="flex-1 bg-green-500"></div>
-                          </div>
-
-                          {/* Marker showing current position */}
-                          <div
-                            className="absolute top-0 bottom-0 w-1 bg-white shadow-lg z-10"
-                            style={{ left: `${Math.min(position.distanceToLiquidation, 100)}%` }}
-                          >
-                            <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-3 h-3 bg-white rounded-full shadow-lg border-2 border-gray-900"></div>
-                            <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-3 h-3 bg-white rounded-full shadow-lg border-2 border-gray-900"></div>
-                          </div>
-
-                          {/* Labels */}
-                          <div className="absolute inset-0 flex items-center justify-between px-2 text-xs font-bold text-white pointer-events-none">
-                            <span className="drop-shadow-lg">DANGER</span>
-                            <span className="drop-shadow-lg">SAFE</span>
-                          </div>
+                        <div className="flex items-baseline gap-2">
+                          <span className={`text-2xl font-bold ${riskLevel.textColor}`}>
+                            {formatCurrency(position.liquidationPrice)}
+                          </span>
+                          <span className={`text-base font-semibold ${riskLevel.textColor}`}>
+                            ({priceToLiquidation > 0 ? '+' : ''}{formatNumber(priceToLiquidation, 1)}%)
+                          </span>
                         </div>
                       </div>
 
-                      <div className="space-y-3">
-                        {/* Delta Neutral Badge */}
-                        {position.isDeltaNeutral && (
-                          <div className="bg-gradient-to-r from-green-100 to-emerald-100 dark:from-green-900/30 dark:to-emerald-900/30 border-2 border-green-500 rounded-lg p-3">
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2">
-                                <svg className="w-5 h-5 text-green-600 dark:text-green-400" fill="currentColor" viewBox="0 0 20 20">
-                                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                                </svg>
-                                <span className="text-sm font-bold text-green-700 dark:text-green-300">DELTA NEUTRAL</span>
-                              </div>
-                              <span className="text-xs font-semibold text-green-600 dark:text-green-400">
-                                Spot: {formatNumber(position.spotBalance || 0, 2)} {position.coin}
-                              </span>
-                            </div>
-                          </div>
-                        )}
-
-                        {/* Not Delta Neutral - Show Warning with Action */}
-                        {!position.isDeltaNeutral && position.deltaNeutralAction && (
-                          <details className="group bg-gradient-to-r from-yellow-100 to-amber-100 dark:from-yellow-900/30 dark:to-amber-900/30 border-2 border-yellow-500 rounded-lg overflow-hidden">
-                            <summary className="p-3 cursor-pointer list-none hover:bg-yellow-200/50 dark:hover:bg-yellow-900/50 transition-colors">
-                              <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                  <svg className="w-5 h-5 text-yellow-600 dark:text-yellow-400" fill="currentColor" viewBox="0 0 20 20">
-                                    <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-                                  </svg>
-                                  <span className="text-sm font-bold text-yellow-700 dark:text-yellow-300">NOT DELTA NEUTRAL</span>
-                                  <svg className="w-4 h-4 text-yellow-600 dark:text-yellow-400 transition-transform group-open:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                                  </svg>
-                                </div>
-                                <span className="text-xs font-semibold text-yellow-600 dark:text-yellow-400">
-                                  Spot: {formatNumber(position.spotBalance || 0, 2)} {position.coin}
-                                </span>
-                              </div>
-                            </summary>
-                            <div className="px-4 pb-4 pt-2 bg-white/50 dark:bg-gray-900/50 border-t border-yellow-300 dark:border-yellow-700">
-                              <div className="space-y-2">
-                                <div className="flex items-start gap-2">
-                                  <svg className="w-5 h-5 text-yellow-600 dark:text-yellow-400 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
-                                    <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
-                                  </svg>
-                                  <div className="flex-1">
-                                    <p className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-1">Recommendation to reach delta neutral:</p>
-                                    <p className="text-sm text-gray-600 dark:text-gray-400">{position.deltaNeutralAction.reason}</p>
-                                  </div>
-                                </div>
-                                <div className="flex items-center gap-2 pt-2">
-                                  <span className={`px-3 py-1.5 rounded-lg text-xs font-bold ${
-                                    position.deltaNeutralAction.action === 'buy'
-                                      ? 'bg-green-500 text-white'
-                                      : 'bg-red-500 text-white'
-                                  }`}>
-                                    {position.deltaNeutralAction.action.toUpperCase()}: {formatNumber(position.deltaNeutralAction.amount, 2)} {position.coin}
-                                  </span>
-                                </div>
-                              </div>
-                            </div>
-                          </details>
-                        )}
-
-                        {/* PnL Section - Split between Unrealized and Funding */}
-                        <div className="grid grid-cols-2 gap-2">
-                          <div className="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3">
-                            <div className="text-center">
-                              <span className="text-xs font-semibold text-gray-600 dark:text-gray-400 block mb-1">Unrealized PnL</span>
-                              <p className={`font-mono text-lg font-black ${position.unrealizedPnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                                {position.unrealizedPnl >= 0 ? '+' : ''}{formatCurrency(position.unrealizedPnl)}
-                              </p>
-                              <p className={`text-xs font-bold ${position.unrealizedPnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                                {position.unrealizedPnl >= 0 ? '+' : ''}{formatNumber(position.unrealizedPnlPercent, 2)}%
-                              </p>
-                            </div>
-                          </div>
-                          <div className="bg-green-50 dark:bg-green-900/20 rounded-lg p-3">
-                            <div className="text-center">
-                              <span className="text-xs font-semibold text-green-700 dark:text-green-400 block mb-1">Funding PnL</span>
-                              <p className={`font-mono text-lg font-black ${(position.fundingPnl || 0) >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                                {(position.fundingPnl || 0) >= 0 ? '+' : ''}{formatCurrency(position.fundingPnl || 0)}
-                              </p>
-                              <p className="text-xs font-bold text-green-700 dark:text-green-400">
-                                All Time
-                              </p>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Size and Spot Balance */}
-                        <div className="space-y-2">
-                          <div className="flex justify-between items-center py-2">
-                            <span className="text-sm text-gray-600 dark:text-gray-400">Short Size</span>
-                            <span className="font-mono text-sm font-bold text-gray-900 dark:text-white">
-                              {formatNumber(Math.abs(position.positionSize), 4)} {position.coin}
+                      {/* Delta Neutral Status - Simplified */}
+                      <div className={`mb-4 p-4 rounded-lg border ${
+                        position.isDeltaNeutral
+                          ? 'bg-emerald-50/50 dark:bg-emerald-950/20 border-emerald-500/30'
+                          : 'bg-amber-50/50 dark:bg-amber-950/20 border-amber-500/30'
+                      }`}>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <svg className={`w-4 h-4 ${position.isDeltaNeutral ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`} fill="currentColor" viewBox="0 0 20 20">
+                              {position.isDeltaNeutral ? (
+                                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                              ) : (
+                                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                              )}
+                            </svg>
+                            <span className={`text-sm font-semibold ${
+                              position.isDeltaNeutral
+                                ? 'text-emerald-700 dark:text-emerald-400'
+                                : 'text-amber-700 dark:text-amber-400'
+                            }`}>
+                              {position.isDeltaNeutral ? 'Delta Neutral' : 'Not Delta Neutral'}
                             </span>
                           </div>
-                          {(position.spotBalance || 0) > 0 && (
-                            <div className="flex justify-between items-center py-2 bg-green-50 dark:bg-green-900/20 rounded px-2">
-                              <span className="text-sm text-green-700 dark:text-green-400 font-semibold">Spot Balance</span>
-                              <span className="font-mono text-sm font-bold text-green-700 dark:text-green-300">
-                                {formatNumber(position.spotBalance || 0, 4)} {position.coin}
+                          {position.isDeltaNeutral && (
+                            <span className="text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                              ✓ Balanced
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Net Gain/Loss */}
+                      <div className={`p-5 rounded-lg border ${
+                        (position.netGain || 0) >= 0
+                          ? 'bg-emerald-50/50 dark:bg-emerald-950/20 border-emerald-500/30'
+                          : 'bg-rose-50/50 dark:bg-rose-950/20 border-rose-500/30'
+                      }`}>
+                        <div className="flex justify-between items-center mb-2">
+                          <span className={`text-sm font-semibold ${
+                            (position.netGain || 0) >= 0
+                              ? 'text-emerald-700 dark:text-emerald-400'
+                              : 'text-rose-700 dark:text-rose-400'
+                          }`}>
+                            Net {(position.netGain || 0) >= 0 ? 'Gain' : 'Loss'}
+                          </span>
+                          <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                            {position.tradeCount || 0} trades
+                          </span>
+                        </div>
+                        <div className="flex items-baseline gap-2">
+                          <span className={`text-2xl font-bold ${
+                            (position.netGain || 0) >= 0
+                              ? 'text-emerald-600 dark:text-emerald-400'
+                              : 'text-rose-600 dark:text-rose-400'
+                          }`}>
+                            {(position.netGain || 0) >= 0 ? '+' : ''}{formatCurrency(position.netGain || 0)}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="mt-4 text-xs text-center text-slate-500 dark:text-slate-400 font-medium">
+                        Click to view detailed information ↓
+                      </div>
+                    </summary>
+
+                    {/* Level 2: Detailed Information (Expandable) */}
+                    <div className="px-6 pb-8 space-y-8 border-t border-slate-200 dark:border-slate-700 pt-8 bg-slate-50/50 dark:bg-slate-900/30">
+
+                      {/* SECTION 1: Position Overview */}
+                      <div className="space-y-4">
+                        <div className="flex items-center gap-2 mb-4">
+                          <svg className="w-5 h-5 text-sky-600 dark:text-sky-400" fill="currentColor" viewBox="0 0 20 20">
+                            <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z"/>
+                            <path fillRule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h.01a1 1 0 100-2H7zm3 0a1 1 0 000 2h3a1 1 0 100-2h-3zm-3 4a1 1 0 100 2h.01a1 1 0 100-2H7zm3 0a1 1 0 100 2h3a1 1 0 100-2h-3z" clipRule="evenodd"/>
+                          </svg>
+                          <h4 className="text-sm font-bold text-slate-700 dark:text-slate-300">Position Overview</h4>
+                        </div>
+
+                        <div className="bg-white dark:bg-slate-800 rounded-lg p-6 border border-slate-200 dark:border-slate-700 space-y-4">
+                          {/* Total Position Value */}
+                          <div className="flex justify-between items-center pb-4 border-b border-slate-200 dark:border-slate-700">
+                            <span className="text-sm text-slate-600 dark:text-slate-400 font-medium">Total Position Value</span>
+                            <span className="font-mono text-base font-bold text-slate-900 dark:text-white">
+                              {formatCurrency(position.positionValueUsd + ((position.spotBalance || 0) * position.markPrice))}
+                            </span>
+                          </div>
+
+                          {/* Short Position */}
+                          <div className="space-y-2">
+                            <div className="flex justify-between items-center">
+                              <span className="text-sm text-slate-600 dark:text-slate-400">Short Position</span>
+                              <span className="font-mono text-sm font-semibold text-slate-900 dark:text-white">
+                                {formatNumber(Math.abs(position.positionSize), 4)} {position.coin}
                               </span>
                             </div>
+                            <div className="flex justify-between items-center text-xs">
+                              <span className="text-slate-500 dark:text-slate-500">Value</span>
+                              <span className="font-mono text-slate-600 dark:text-slate-400">{formatCurrency(position.positionValueUsd)}</span>
+                            </div>
+                          </div>
+
+                          {/* Long (Spot) Position */}
+                          {(position.spotBalance || 0) > 0 && (
+                            <div className="space-y-2 pt-4 border-t border-slate-200 dark:border-slate-700">
+                              <div className="flex justify-between items-center">
+                                <span className="text-sm text-emerald-700 dark:text-emerald-400 font-medium">Long (Spot)</span>
+                                <span className="font-mono text-sm font-semibold text-emerald-700 dark:text-emerald-400">
+                                  {formatNumber(position.spotBalance || 0, 4)} {position.coin}
+                                </span>
+                              </div>
+                              <div className="flex justify-between items-center text-xs">
+                                <span className="text-slate-500">Value</span>
+                                <span className="font-mono text-emerald-600 dark:text-emerald-400">{formatCurrency((position.spotBalance || 0) * position.markPrice)}</span>
+                              </div>
+                            </div>
                           )}
+
+                          {/* Delta Imbalance */}
                           {position.deltaImbalance !== undefined && Math.abs(position.deltaImbalance) > 0.01 && (
-                            <div className="flex justify-between items-center py-1">
-                              <span className="text-xs text-gray-500 dark:text-gray-400">Delta Imbalance</span>
-                              <span className={`font-mono text-xs font-semibold ${Math.abs(position.deltaImbalance) < Math.abs(position.positionSize) * 0.05 ? 'text-green-600 dark:text-green-400' : 'text-orange-600 dark:text-orange-400'}`}>
+                            <div className="flex justify-between items-center pt-4 border-t border-slate-200 dark:border-slate-700">
+                              <span className="text-sm text-slate-600 dark:text-slate-400">Delta Imbalance</span>
+                              <span className={`font-mono text-sm font-semibold ${
+                                Math.abs(position.deltaImbalance) < Math.abs(position.positionSize) * 0.05
+                                  ? 'text-emerald-600 dark:text-emerald-400'
+                                  : 'text-amber-600 dark:text-amber-400'
+                              }`}>
                                 {position.deltaImbalance > 0 ? '+' : ''}{formatNumber(position.deltaImbalance, 4)} {position.coin}
                               </span>
                             </div>
                           )}
-                        </div>
 
-                        {/* Prices Compact */}
-                        <div className="grid grid-cols-3 gap-2 pt-3 border-t border-gray-200 dark:border-gray-700">
-                          <div>
-                            <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">Entry</p>
-                            <p className="font-mono text-sm font-semibold text-gray-900 dark:text-white">
-                              {formatCurrency(position.entryPrice)}
-                            </p>
-                          </div>
-                          <div>
-                            <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">Current</p>
-                            <p className={`font-mono text-sm font-bold ${priceChangePercent < 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                              {formatCurrency(position.markPrice)}
-                            </p>
-                            <p className={`text-xs font-medium ${priceChangePercent < 0 ? 'text-green-600' : 'text-red-600'}`}>
-                              {priceChangePercent > 0 ? '+' : ''}{formatNumber(priceChangePercent, 1)}%
-                            </p>
-                          </div>
-                          <div>
-                            <p className="text-xs text-red-700 dark:text-red-400 font-semibold mb-1">Liquidation</p>
-                            <p className="font-mono text-sm font-bold text-red-600 dark:text-red-400">
-                              {formatCurrency(position.liquidationPrice)}
-                            </p>
-                            <p className="text-xs font-medium text-red-600">
-                              {priceToLiquidation > 0 ? '+' : ''}{formatNumber(priceToLiquidation, 1)}%
-                            </p>
+                          {/* Margin & Leverage */}
+                          <div className="grid grid-cols-2 gap-4 pt-4 border-t border-slate-200 dark:border-slate-700">
+                            <div>
+                              <p className="text-xs text-slate-500 dark:text-slate-400 mb-1.5">Margin</p>
+                              <p className="text-base font-semibold text-slate-900 dark:text-white">{formatCurrency(position.margin)}</p>
+                            </div>
+                            <div>
+                              <p className="text-xs text-slate-500 dark:text-slate-400 mb-1.5">Leverage</p>
+                              <p className="text-base font-semibold text-slate-900 dark:text-white">{Math.abs(position.leverage)}x</p>
+                            </div>
                           </div>
                         </div>
                       </div>
+
+                      {/* SECTION 2: Revenue & Fees Breakdown */}
+                      <div className="space-y-4">
+                        <div className="flex items-center gap-2 mb-4">
+                          <svg className="w-5 h-5 text-emerald-600 dark:text-emerald-400" fill="currentColor" viewBox="0 0 20 20">
+                            <path d="M8.433 7.418c.155-.103.346-.196.567-.267v1.698a2.305 2.305 0 01-.567-.267C8.07 8.34 8 8.114 8 8c0-.114.07-.34.433-.582zM11 12.849v-1.698c.22.071.412.164.567.267.364.243.433.468.433.582 0 .114-.07.34-.433.582a2.305 2.305 0 01-.567.267z"/>
+                            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-13a1 1 0 10-2 0v.092a4.535 4.535 0 00-1.676.662C6.602 6.234 6 7.009 6 8c0 .99.602 1.765 1.324 2.246.48.32 1.054.545 1.676.662v1.941c-.391-.127-.68-.317-.843-.504a1 1 0 10-1.51 1.31c.562.649 1.413 1.076 2.353 1.253V15a1 1 0 102 0v-.092a4.535 4.535 0 001.676-.662C13.398 13.766 14 12.991 14 12c0-.99-.602-1.765-1.324-2.246A4.535 4.535 0 0011 9.092V7.151c.391.127.68.317.843.504a1 1 0 101.511-1.31c-.563-.649-1.413-1.076-2.354-1.253V5z" clipRule="evenodd"/>
+                          </svg>
+                          <h4 className="text-sm font-bold text-slate-700 dark:text-slate-300">Revenue & Fees</h4>
+                        </div>
+
+                        <div className="bg-white dark:bg-slate-800 rounded-lg p-6 border border-slate-200 dark:border-slate-700 space-y-3">
+                          {/* Funding Revenue */}
+                          <div className="flex justify-between items-center bg-emerald-50/50 dark:bg-emerald-950/20 rounded-lg p-4 border border-emerald-200/30 dark:border-emerald-700/30">
+                            <span className="text-sm text-emerald-700 dark:text-emerald-400 font-medium">Funding Revenue</span>
+                            <span className="font-mono text-base font-semibold text-emerald-600 dark:text-emerald-400">
+                              +{formatCurrency(position.fundingPnl || 0)}
+                            </span>
+                          </div>
+
+                          {/* Hyperliquid Fees */}
+                          <div className="flex justify-between items-center bg-rose-50/50 dark:bg-rose-950/20 rounded-lg p-4 border border-rose-200/30 dark:border-rose-700/30">
+                            <div>
+                              <span className="text-sm text-rose-700 dark:text-rose-400 font-medium">Hyperliquid Fees</span>
+                              <span className="text-xs text-slate-500 dark:text-slate-400 ml-2">({position.tradeCount || 0} trades)</span>
+                            </div>
+                            <span className="font-mono text-base font-semibold text-rose-600 dark:text-rose-400">
+                              -{formatCurrency(position.hyperliquidFees || 0)}
+                            </span>
+                          </div>
+
+                          {/* Binance Equivalent Fees */}
+                          <div className="flex justify-between items-center bg-rose-50/50 dark:bg-rose-950/20 rounded-lg p-4 border border-rose-200/30 dark:border-rose-700/30">
+                            <div>
+                              <span className="text-sm text-rose-700 dark:text-rose-400 font-medium">Binance Equiv. Fees</span>
+                              <span className="text-xs text-slate-500 dark:text-slate-400 ml-2">(0.1% SPOT)</span>
+                            </div>
+                            <span className="font-mono text-base font-semibold text-rose-600 dark:text-rose-400">
+                              -{formatCurrency(position.binanceEquivalentFees || 0)}
+                            </span>
+                          </div>
+
+                          {/* Future Closing Fees */}
+                          <div className="flex justify-between items-center bg-amber-50/50 dark:bg-amber-950/20 rounded-lg p-4 border border-amber-200/30 dark:border-amber-700/30">
+                            <div>
+                              <span className="text-sm text-amber-700 dark:text-amber-400 font-medium">Future Closing Fees</span>
+                              <span className="text-xs text-slate-500 dark:text-slate-400 ml-2">(Est.)</span>
+                            </div>
+                            <span className="font-mono text-base font-semibold text-amber-600 dark:text-amber-400">
+                              -{formatCurrency(position.futureClosingFees || 0)}
+                            </span>
+                          </div>
+
+                          {/* Delta Imbalance Exposure (if exists) */}
+                          {(position.deltaImbalanceValue || 0) > 0.01 && (
+                            <div className="flex justify-between items-center bg-yellow-50/50 dark:bg-yellow-950/20 rounded-lg p-4 border border-yellow-200/30 dark:border-yellow-700/30">
+                              <div>
+                                <span className="text-sm text-yellow-700 dark:text-yellow-400 font-medium">Position Imbalance</span>
+                                <span className="text-xs text-slate-500 dark:text-slate-400 ml-2">
+                                  ({Math.abs(position.deltaImbalance || 0).toFixed(2)} {position.coin})
+                                </span>
+                              </div>
+                              <span className="font-mono text-sm font-semibold text-yellow-600 dark:text-yellow-400">
+                                Risk: {formatCurrency(position.deltaImbalanceValue || 0)}
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Net Gain/Loss Summary */}
+                          <div className={`flex justify-between items-center rounded-lg p-5 mt-4 border ${
+                            (position.netGain || 0) >= 0
+                              ? 'bg-emerald-50/50 dark:bg-emerald-950/20 border-emerald-500/30'
+                              : 'bg-rose-50/50 dark:bg-rose-950/20 border-rose-500/30'
+                          }`}>
+                            <span className={`text-sm font-bold ${
+                              (position.netGain || 0) >= 0
+                                ? 'text-emerald-700 dark:text-emerald-400'
+                                : 'text-rose-700 dark:text-rose-400'
+                            }`}>
+                              NET {(position.netGain || 0) >= 0 ? 'GAIN' : 'LOSS'}
+                            </span>
+                            <span className={`font-mono text-xl font-bold ${
+                              (position.netGain || 0) >= 0
+                                ? 'text-emerald-600 dark:text-emerald-400'
+                                : 'text-rose-600 dark:text-rose-400'
+                            }`}>
+                              {(position.netGain || 0) >= 0 ? '+' : ''}{formatCurrency(position.netGain || 0)}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* SECTION 3: Price Analysis */}
+                      <div className="space-y-4">
+                        <div className="flex items-center gap-2 mb-4">
+                          <svg className="w-5 h-5 text-violet-600 dark:text-violet-400" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M3 3a1 1 0 000 2v8a2 2 0 002 2h2.586l-1.293 1.293a1 1 0 101.414 1.414L10 15.414l2.293 2.293a1 1 0 001.414-1.414L12.414 15H15a2 2 0 002-2V5a1 1 0 100-2H3zm11.707 4.707a1 1 0 00-1.414-1.414L10 9.586 8.707 8.293a1 1 0 00-1.414 0l-2 2a1 1 0 101.414 1.414L8 10.414l1.293 1.293a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
+                          </svg>
+                          <h4 className="text-sm font-bold text-slate-700 dark:text-slate-300">Price Analysis</h4>
+                        </div>
+
+                        <div className="bg-white dark:bg-slate-800 rounded-lg p-6 border border-slate-200 dark:border-slate-700">
+                          <div className="grid grid-cols-3 gap-4">
+                            <div className="text-center">
+                              <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">Entry</p>
+                              <p className="font-mono text-base font-semibold text-slate-900 dark:text-white">
+                                {formatCurrency(position.entryPrice)}
+                              </p>
+                            </div>
+                            <div className="text-center border-x border-slate-200 dark:border-slate-700">
+                              <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">Current</p>
+                              <p className={`font-mono text-base font-bold ${
+                                priceChangePercent < 0
+                                  ? 'text-emerald-600 dark:text-emerald-400'
+                                  : 'text-rose-600 dark:text-rose-400'
+                              }`}>
+                                {formatCurrency(position.markPrice)}
+                              </p>
+                              <p className={`text-xs font-medium mt-1 ${
+                                priceChangePercent < 0 ? 'text-emerald-600' : 'text-rose-600'
+                              }`}>
+                                {priceChangePercent > 0 ? '+' : ''}{formatNumber(priceChangePercent, 1)}%
+                              </p>
+                            </div>
+                            <div className="text-center">
+                              <p className="text-xs text-rose-700 dark:text-rose-400 font-medium mb-2">Liquidation</p>
+                              <p className="font-mono text-base font-bold text-rose-600 dark:text-rose-400">
+                                {formatCurrency(position.liquidationPrice)}
+                              </p>
+                              <p className="text-xs font-medium text-rose-600 mt-1">
+                                {priceToLiquidation > 0 ? '+' : ''}{formatNumber(priceToLiquidation, 1)}%
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* SECTION 4: Delta Neutral Action (if not neutral) */}
+                      {!position.isDeltaNeutral && position.deltaNeutralAction && (
+                        <div className="space-y-4">
+                          <div className="flex items-center gap-2 mb-4">
+                            <svg className="w-5 h-5 text-amber-600 dark:text-amber-400" fill="currentColor" viewBox="0 0 20 20">
+                              <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd"/>
+                            </svg>
+                            <h4 className="text-sm font-bold text-amber-700 dark:text-amber-400">Action Required</h4>
+                          </div>
+
+                          <div className="bg-amber-50/50 dark:bg-amber-950/20 border border-amber-500/30 rounded-lg p-6">
+                            <p className="text-sm text-slate-700 dark:text-slate-300 mb-4 leading-relaxed">
+                              {position.deltaNeutralAction.reason}
+                            </p>
+                            <button className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold shadow-sm transition-all duration-200 ${
+                              position.deltaNeutralAction.action.includes('buy')
+                                ? 'bg-emerald-500 hover:bg-emerald-600 text-white'
+                                : 'bg-rose-500 hover:bg-rose-600 text-white'
+                            }`}>
+                              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-8.707l-3-3a1 1 0 00-1.414 0l-3 3a1 1 0 001.414 1.414L9 9.414V13a1 1 0 102 0V9.414l1.293 1.293a1 1 0 001.414-1.414z" clipRule="evenodd"/>
+                              </svg>
+                              {position.deltaNeutralAction.action.toUpperCase().replace('_', ' ')}: {formatNumber(position.deltaNeutralAction.amount, 2)} {position.coin}
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  </div>
+                  </details>
                 );
               })}
             </div>

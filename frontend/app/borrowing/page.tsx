@@ -11,7 +11,7 @@ type SortOption = 'healthFactor' | 'borrowed' | 'collateral' | 'risk';
 type FilterProtocol = 'all' | 'morpho' | 'aave' | 'jupiter';
 
 export default function BorrowingPage() {
-  const [walletAddress, setWalletAddress] = useState('');
+  const [walletAddress, setWalletAddress] = useState(process.env.NEXT_PUBLIC_DEFAULT_EVM_ADDRESS || '');
   const [solanaAddress, setSolanaAddress] = useState('');
   const [morphoData, setMorphoData] = useState<MorphoResponse | null>(null);
   const [aaveData, setAaveData] = useState<AaveResponse | null>(null);

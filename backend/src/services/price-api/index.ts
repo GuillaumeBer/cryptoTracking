@@ -34,9 +34,13 @@ const BINANCE_SYMBOL_MAP: { [key: string]: string } = {
   'ARB': 'ARBUSDT',
   'AVAX': 'AVAXUSDT',
   'WAVAX': 'AVAXUSDT',
+  'sAVAX': 'AVAXUSDT', // Staked AVAX - use AVAX price as approximation
   'BNB': 'BNBUSDT',
   'WBNB': 'BNBUSDT',
   'SOL': 'SOLUSDT',
+  'wSOL': 'SOLUSDT',
+  'S': 'SUSDT', // Sonic token
+  'wS': 'SUSDT', // Wrapped Sonic
   'CAKE': 'CAKEUSDT',
   'UNI': 'UNIUSDT',
   'SUSHI': 'SUSHIUSDT',
@@ -48,6 +52,26 @@ const BINANCE_SYMBOL_MAP: { [key: string]: string } = {
   // Sui ecosystem
   'SUI': 'SUIUSDT',
 };
+
+/**
+ * Try to unwrap token symbols to find Binance trading pairs
+ * For example: wS -> S, WAVAX -> AVAX, wSOL -> SOL
+ */
+function getUnwrappedSymbol(symbol: string): string | null {
+  // Handle common wrapped token prefixes
+  if (symbol.startsWith('w') && symbol.length > 1) {
+    const unwrapped = symbol.substring(1); // Remove 'w' prefix
+    return unwrapped;
+  }
+
+  // Handle staked versions (sAVAX -> AVAX)
+  if (symbol.startsWith('s') && symbol.length > 1) {
+    const unwrapped = symbol.substring(1);
+    return unwrapped;
+  }
+
+  return null;
+}
 
 // Map token symbols to CoinGecko IDs (fallback for tokens not on Binance)
 const COINGECKO_SYMBOL_MAP: { [key: string]: string } = {
@@ -136,6 +160,26 @@ class PriceService {
       return { price: tokenPrice, source: 'binance' };
     }
 
+    // Try unwrapped version on Binance (e.g., wS -> S, WAVAX -> AVAX)
+    const unwrapped = getUnwrappedSymbol(symbol);
+    if (unwrapped) {
+      const unwrappedBinanceSymbol = BINANCE_SYMBOL_MAP[unwrapped];
+      if (unwrappedBinanceSymbol) {
+        const unwrappedPrice = await binancePriceService.getPrice(unwrappedBinanceSymbol);
+        if (unwrappedPrice !== null) {
+          console.log(`📦 Using unwrapped price for ${symbol}: ${unwrapped} = $${unwrappedPrice}`);
+          return { price: unwrappedPrice, source: 'binance' };
+        }
+      }
+
+      // Try direct unwrapped token lookup
+      const unwrappedTokenPrice = await binancePriceService.getTokenUsdPrice(unwrapped);
+      if (unwrappedTokenPrice !== null) {
+        console.log(`📦 Using unwrapped price for ${symbol}: ${unwrapped} = $${unwrappedTokenPrice}`);
+        return { price: unwrappedTokenPrice, source: 'binance' };
+      }
+    }
+
     // Fall back to CoinGecko
     const coinGeckoId = COINGECKO_SYMBOL_MAP[symbol];
     if (coinGeckoId) {
@@ -162,6 +206,8 @@ class PriceService {
     const results: { [symbol: string]: PriceResult } = {};
     const binanceSymbols: string[] = [];
     const binanceMap: { [binanceSymbol: string]: string } = {};
+    const unwrappedSymbols: string[] = []; // Symbols that need unwrapping
+    const unwrappedMap: { [original: string]: string } = {}; // Map original -> unwrapped
     const coinGeckoSymbols: string[] = [];
 
     // Categorize symbols
@@ -170,17 +216,38 @@ class PriceService {
       if (binanceSymbol) {
         binanceSymbols.push(symbol);
         binanceMap[symbol] = binanceSymbol;
-      } else if (COINGECKO_SYMBOL_MAP[symbol]) {
-        coinGeckoSymbols.push(symbol);
+      } else {
+        // Try to find unwrapped version
+        const unwrapped = getUnwrappedSymbol(symbol);
+        if (unwrapped && BINANCE_SYMBOL_MAP[unwrapped]) {
+          unwrappedSymbols.push(symbol);
+          unwrappedMap[symbol] = unwrapped;
+        } else if (COINGECKO_SYMBOL_MAP[symbol]) {
+          coinGeckoSymbols.push(symbol);
+        }
       }
     }
 
     // Fetch Binance prices in batch (single API call)
-    if (binanceSymbols.length > 0) {
-      const binancePrices = await binancePriceService.getTokenUsdPrices(binanceSymbols);
+    if (binanceSymbols.length > 0 || unwrappedSymbols.length > 0) {
+      // Get all prices from Binance
+      const allPrices = await binancePriceService.getAllPrices();
+
+      // Use the binanceMap to get prices for directly mapped symbols
       for (const symbol of binanceSymbols) {
-        if (binancePrices[symbol] !== undefined) {
-          results[symbol] = { price: binancePrices[symbol], source: 'binance' };
+        const binancePair = binanceMap[symbol];
+        if (binancePair && allPrices[binancePair] !== undefined) {
+          results[symbol] = { price: allPrices[binancePair], source: 'binance' };
+        }
+      }
+
+      // Use unwrapped symbols for wrapped tokens
+      for (const symbol of unwrappedSymbols) {
+        const unwrapped = unwrappedMap[symbol];
+        const binancePair = BINANCE_SYMBOL_MAP[unwrapped];
+        if (binancePair && allPrices[binancePair] !== undefined) {
+          console.log(`📦 Using unwrapped price for ${symbol}: ${unwrapped} = $${allPrices[binancePair]}`);
+          results[symbol] = { price: allPrices[binancePair], source: 'binance' };
         }
       }
     }

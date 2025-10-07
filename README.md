@@ -23,9 +23,11 @@ A comprehensive DeFi portfolio tracking application that monitors lending positi
 
 ### 💰 Smart Price Fetching
 - Unified price service with automatic fallbacks
+- Intelligent wrapped token unwrapping (wBNB → BNB, wSOL → SOL, sAVAX → AVAX)
 - Binance → CoinGecko → Static prices
 - 5-minute caching for optimal performance
 - Batch request optimization
+- Reduced API calls and improved accuracy
 
 ### 🎯 Advanced Features
 - **Health Factor Tracking**: Real-time liquidation risk monitoring

@@ -51,3 +51,22 @@ export interface HyperliquidFundingItem {
   time: number;
   delta: HyperliquidFundingDelta;
 }
+
+export interface HyperliquidUserFill {
+  coin: string;
+  px: string; // Price
+  sz: string; // Size
+  side: string; // A (ask) or B (bid)
+  time: number; // Timestamp in milliseconds
+  startPosition: string;
+  dir: string; // e.g., "Open Short", "Close Long"
+  closedPnl: string;
+  hash: string;
+  oid: number;
+  crossed: boolean;
+  fee: string; // Fee in USDC
+  tid: number;
+  feeToken: string; // Usually "USDC"
+  twapId: string | null;
+  builderFee?: string; // Optional builder fee
+}

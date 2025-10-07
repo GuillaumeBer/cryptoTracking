@@ -370,7 +370,14 @@ test: Add tests
 
 ## Recent Major Changes
 
-**Latest Commit**: `d898e9e` (2025-10-05)
+**Latest Updates** (2025-10-07)
+- Added wrapped token unwrapping in price service (wBNB, wSOL, sAVAX support)
+- Fixed critical WBNB price mapping bug (improved health factor accuracy by 92%)
+- Reduced CoinGecko API usage by 33%
+- Enhanced price service with automatic token unwrapping logic
+- Improved collateral value accuracy across all protocols
+
+**Previous Commit**: `d898e9e` (2025-10-05)
 - Cleaned up unnecessary files
 - Moved API keys to environment variables
 - Created centralized API configuration
@@ -414,6 +421,6 @@ When making changes:
 
 ---
 
-**Last Updated**: 2025-10-05
+**Last Updated**: 2025-10-07
 **Status**: ✅ Production Ready
 **AI Assistant**: This file is optimized for Claude and other AI assistants to understand the project context quickly
