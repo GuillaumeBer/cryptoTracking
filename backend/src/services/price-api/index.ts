@@ -152,12 +152,12 @@ class PriceService {
       if (binancePrice !== null) {
         return { price: binancePrice, source: 'binance' };
       }
-    }
-
-    // Try alternative Binance lookup
-    const tokenPrice = await binancePriceService.getTokenUsdPrice(symbol);
-    if (tokenPrice !== null) {
-      return { price: tokenPrice, source: 'binance' };
+    } else {
+      // Try alternative Binance lookup for symbols not in the map
+      const tokenPrice = await binancePriceService.getTokenUsdPrice(symbol);
+      if (tokenPrice !== null) {
+        return { price: tokenPrice, source: 'binance' };
+      }
     }
 
     // Try unwrapped version on Binance (e.g., wS -> S, WAVAX -> AVAX)

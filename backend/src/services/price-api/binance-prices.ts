@@ -76,7 +76,7 @@ export class BinancePriceService {
   private cache: Map<string, CachedPrice> = new Map();
   private allPricesCache: { prices: { [symbol: string]: number }; timestamp: number } | null = null;
   private readonly cacheTTL: number;
-  private readonly baseUrl: string = 'https://api.binance.com/api/v3';
+  private readonly baseUrl: string = 'https://api.binance.us/api/v3';
 
   private constructor() {
     const config = priceApiConfig.binance;
