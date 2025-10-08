@@ -27,16 +27,37 @@ interface RawMockFeed {
   venues: Record<string, RawMockVenue>;
 }
 
-const DEFAULT_MOCK_PATH = path.resolve(process.cwd(), 'mocks', 'perp_feeds', 'sample_feeds.json');
+const DEFAULT_RELATIVE_PATH = ['mocks', 'perp_feeds', 'sample_feeds.json'];
 
 let cachedFeed: { data: RawMockFeed; mtimeMs: number } | null = null;
 
 function readMockFeedFile(): RawMockFeed {
   const customPath = process.env.PERP_MOCK_PATH;
-  const filePath = customPath ? path.resolve(process.cwd(), customPath) : DEFAULT_MOCK_PATH;
 
-  if (!fs.existsSync(filePath)) {
-    throw new Error(`Perp mock feed not found at ${filePath}. Set PERP_MOCK_PATH or generate mock data.`);
+  const candidatePaths: string[] = [];
+
+  if (customPath) {
+    candidatePaths.push(path.resolve(process.cwd(), customPath));
+  }
+
+  candidatePaths.push(
+    path.resolve(process.cwd(), ...DEFAULT_RELATIVE_PATH),
+    path.resolve(__dirname, '../../../', ...DEFAULT_RELATIVE_PATH),
+    path.resolve(__dirname, '../../../../', ...DEFAULT_RELATIVE_PATH),
+    path.resolve(__dirname, '../../../../../', ...DEFAULT_RELATIVE_PATH) // in case CWD is backend/dist
+  );
+
+  let filePath: string | null = null;
+
+  for (const candidate of candidatePaths) {
+    if (fs.existsSync(candidate)) {
+      filePath = candidate;
+      break;
+    }
+  }
+
+  if (!filePath) {
+    throw new Error(`Perp mock feed not found. Checked: ${candidatePaths.join(', ')}. Set PERP_MOCK_PATH or generate mock data.`);
   }
 
   const stats = fs.statSync(filePath);
