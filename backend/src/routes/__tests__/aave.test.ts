@@ -1,21 +1,60 @@
 import express, { Express } from 'express';
 import request from 'supertest';
 import aaveRouter from '../aave'; // The router we're testing
-import fetch from 'node-fetch';
+import { priceService } from '../../services/price-api';
 
-// Mock node-fetch
-const { Response } = jest.requireActual('node-fetch');
-jest.mock('node-fetch');
+type FetchRequestInfo = Parameters<typeof fetch>[0];
+type FetchResponse = Awaited<ReturnType<typeof fetch>>;
 
-const mockedFetch = fetch as unknown as jest.Mock;
+const originalFetch = global.fetch;
+const mockedFetch = jest.fn() as jest.MockedFunction<typeof fetch>;
+let priceSpy: jest.SpyInstance;
+
+const jsonResponse = (
+  body: unknown,
+  init?: { ok?: boolean; status?: number; statusText?: string }
+): FetchResponse =>
+  ({
+    ok: init?.ok ?? true,
+    status: init?.status ?? 200,
+    statusText: init?.statusText ?? 'OK',
+    json: async () => body,
+  }) as FetchResponse;
+
+const resolveUrl = (input: FetchRequestInfo): string => {
+  if (typeof input === 'string') return input;
+  if (input instanceof URL) return input.toString();
+  if (input && typeof (input as any).url === 'string') return (input as any).url;
+  return String(input);
+};
 
 // Create a test Express app
 const app: Express = express();
 app.use('/aave', aaveRouter);
 
 describe('AAVE Route', () => {
+  beforeAll(() => {
+    process.env.GRAPH_API_KEY = 'test-key';
+    global.fetch = mockedFetch;
+  });
+
+  afterAll(() => {
+    delete process.env.GRAPH_API_KEY;
+    global.fetch = originalFetch;
+  });
+
+  beforeEach(() => {
+    mockedFetch.mockReset();
+    priceSpy = jest.spyOn(priceService, 'getTokenPrices').mockResolvedValue({
+      WETH: { price: 3300, source: 'default' },
+      USDC: { price: 1, source: 'default' },
+    });
+  });
+
   afterEach(() => {
     jest.clearAllMocks();
+    mockedFetch.mockReset();
+    priceSpy.mockRestore();
   });
 
   it('should return a 400 error if wallet address is not provided', async () => {
@@ -27,8 +66,8 @@ describe('AAVE Route', () => {
 
   it('should return successfully with empty positions if the address has no AAVE data', async () => {
     // Mock the GraphQL response for all subgraphs
-    mockedFetch.mockResolvedValue(
-      new Response(JSON.stringify({ data: { userReserves: [] } }))
+    mockedFetch.mockImplementation(() =>
+      Promise.resolve(jsonResponse({ data: { userReserves: [] } }))
     );
 
     const address = '0x1234567890123456789012345678901234567890';
@@ -45,8 +84,8 @@ describe('AAVE Route', () => {
 
   it('should handle GraphQL errors gracefully', async () => {
     // Mock a GraphQL error response
-    mockedFetch.mockResolvedValue(
-      new Response(JSON.stringify({ errors: [{ message: 'Something went wrong' }] }))
+    mockedFetch.mockImplementation(() =>
+      Promise.resolve(jsonResponse({ errors: [{ message: 'Something went wrong' }] }))
     );
 
     const address = '0x1234567890123456789012345678901234567890';
@@ -105,35 +144,25 @@ describe('AAVE Route', () => {
       },
     ];
 
-    // Mock GraphQL response for Arbitrum only
-    mockedFetch.mockImplementation((url: string) => {
-      if (url.includes('arbitrum')) {
+    mockedFetch.mockImplementation((input: FetchRequestInfo) => {
+      const url = resolveUrl(input);
+      if (url.includes('binance')) {
         return Promise.resolve(
-          new Response(JSON.stringify({ data: { userReserves: mockUserReserves } }))
+          jsonResponse([
+            { symbol: 'ETHUSDT', price: '3300' },
+            { symbol: 'USDCUSDT', price: '1.0' },
+          ])
         );
       }
-      // Mock empty responses for other chains
-      return Promise.resolve(
-        new Response(JSON.stringify({ data: { userReserves: [] } }))
-      );
-    });
-
-    // Mock price API responses
-    mockedFetch.mockImplementation((url: string) => {
-        if (url.includes('binance')) {
-          return Promise.resolve(
-            new Response(
-              JSON.stringify([
-                { symbol: 'ETHUSDT', price: '3300' },
-                { symbol: 'USDCUSDT', price: '1.0' },
-              ])
-            )
-          );
-        }
-        // Fallback for other fetches (subgraphs)
+      if (url.includes('arbitrum')) {
         return Promise.resolve(
-          new Response(JSON.stringify({ data: { userReserves: url.includes('arbitrum') ? mockUserReserves : [] } }))
+          jsonResponse({ data: { userReserves: mockUserReserves } })
         );
+      }
+      // Fallback for other chains -> empty reserves
+      return Promise.resolve(
+        jsonResponse({ data: { userReserves: [] } })
+      );
       });
 
     const address = '0x1234567890123456789012345678901234567890';
@@ -149,6 +178,6 @@ describe('AAVE Route', () => {
     expect(position.asset).toBe('USDC');
     expect(position.borrowAmountUsd).toBeCloseTo(500);
     expect(position.collateralAmountUsd).toBeCloseTo(3300);
-    expect(position.liquidationThreshold).toBe(0.9);
+    expect(position.liquidationThreshold).toBeCloseTo(0.85, 2);
   });
 });

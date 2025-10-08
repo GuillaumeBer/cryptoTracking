@@ -1,0 +1,89 @@
+{
+  "generatedAt": "2025-10-07T12:00:00Z",
+  "schemaVersion": "0.1.0",
+  "venues": {
+    "aster": {
+      "status": "mock",
+      "markets": [
+        {
+          "symbol": "BTC-USDT",
+          "markPrice": 63500.25,
+          "fundingRateHourly": 0.00018,
+          "fundingRateAnnualized": 0.158,
+          "openInterestUsd": 1200000000,
+          "takerFeeBps": 7,
+          "makerFeeBps": -1,
+          "minQty": 0.001,
+          "depthTop5": [
+            { "side": "bid", "price": 63490.1, "size": 25.6 },
+            { "side": "bid", "price": 63480.8, "size": 18.4 },
+            { "side": "ask", "price": 63510.4, "size": 19.9 },
+            { "side": "ask", "price": 63515.7, "size": 16.2 }
+          ]
+        }
+      ]
+    },
+    "avantis": {
+      "status": "mock",
+      "markets": [
+        {
+          "symbol": "SOL-USD",
+          "markPrice": 142.75,
+          "fundingRateHourly": 0.00022,
+          "fundingRateAnnualized": 0.193,
+          "openInterestUsd": 89000000,
+          "takerFeeBps": 8,
+          "makerFeeBps": 0,
+          "minQty": 1,
+          "depthTop5": [
+            { "side": "bid", "price": 142.5, "size": 4200 },
+            { "side": "ask", "price": 143.0, "size": 4100 }
+          ]
+        }
+      ]
+    },
+    "jupiter_perps": {
+      "status": "mock",
+      "markets": [
+        {
+          "symbol": "SOL-USDC",
+          "markPrice": 142.6,
+          "fundingRateHourly": 0.00015,
+          "fundingRateAnnualized": 0.131,
+          "openInterestUsd": 45000000,
+          "takerFeeBps": 10,
+          "makerFeeBps": 0,
+          "minQty": 0.1,
+          "depthTop5": [
+            { "side": "bid", "price": 142.45, "size": 2500 },
+            { "side": "ask", "price": 142.85, "size": 2300 }
+          ]
+        }
+      ]
+    },
+    "synfutures_v3": {
+      "status": "mock",
+      "markets": [
+        {
+          "symbol": "OP-BTC",
+          "markPrice": 0.000075,
+          "fundingRateHourly": -0.00012,
+          "fundingRateAnnualized": -0.105,
+          "openInterestUsd": 5600000,
+          "takerFeeBps": 15,
+          "makerFeeBps": 5,
+          "minQty": 10,
+          "oracle": {
+            "primary": "Pyth",
+            "secondary": "Chainlink",
+            "deviationBps": 12
+          },
+          "depthTop5": [
+            { "side": "bid", "price": 0.0000745, "size": 90000 },
+            { "side": "ask", "price": 0.0000755, "size": 88000 }
+          ]
+        }
+      ]
+    }
+  }
+}

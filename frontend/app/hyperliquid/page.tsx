@@ -59,6 +59,8 @@ export default function HyperliquidPage() {
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const [totalFundingPnl, setTotalFundingPnl] = useState(0);
   const [totalNetGain, setTotalNetGain] = useState(0);
+  const [totalNetGainAllTime, setTotalNetGainAllTime] = useState(0);
+  const [isClient, setIsClient] = useState(false);
 
   const fetchPositions = async () => {
     if (!walletAddress) {
@@ -80,7 +82,12 @@ export default function HyperliquidPage() {
 
         // Calculate total net gain/loss from all positions
         const totalNet = positionsData.reduce((sum: number, pos: HyperliquidPosition) => sum + (pos.netGain || 0), 0);
+        const totalNetAll = positionsData.reduce(
+          (sum: number, pos: HyperliquidPosition) => sum + (pos.netRevenueAllTime ?? pos.netGainAdjusted ?? pos.netGain ?? 0),
+          0
+        );
         setTotalNetGain(totalNet);
+        setTotalNetGainAllTime(totalNetAll);
 
         setLastUpdate(new Date());
       } else {
@@ -103,6 +110,10 @@ export default function HyperliquidPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [walletAddress]);
 
+  useEffect(() => {
+    setIsClient(true);
+  }, []);
+
   const formatNumber = (value: number, decimals: number = 2) => {
     return new Intl.NumberFormat('en-US', {
       minimumFractionDigits: 0,
@@ -116,6 +127,11 @@ export default function HyperliquidPage() {
       maximumFractionDigits: 2,
     }).format(Math.abs(value));
     return `$${formatted}`;
+  };
+
+  const formatSignedCurrency = (value: number) => {
+    const sign = value >= 0 ? '+' : '-';
+    return `${sign}${formatCurrency(value)}`;
   };
 
   const getRiskLevel = (distancePercent: number) => {
@@ -147,6 +163,14 @@ export default function HyperliquidPage() {
       borderColor: 'border-emerald-500/50',
       bgColor: 'bg-emerald-50/50 dark:bg-emerald-950/20'
     };
+  };
+
+  const formatFundingCountdown = (targetTime: number) => {
+    const now = Date.now();
+    const diff = Math.max(targetTime - now, 0);
+    const hours = Math.floor(diff / (1000 * 60 * 60));
+    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+    return `${hours}h ${minutes}m`;
   };
 
   const totalPositionValue = positions.reduce((sum, pos) => sum + Math.abs(pos.positionValueUsd), 0);
@@ -206,13 +230,18 @@ export default function HyperliquidPage() {
                   }`}>
                     {totalNetGain >= 0 ? '+' : ''}{formatCurrency(totalNetGain)}
                   </p>
-                  <p className={`text-sm ${
-                    totalNetGain >= 0
-                      ? 'text-emerald-600 dark:text-emerald-400'
-                      : 'text-rose-600 dark:text-rose-400'
-                  }`}>
-                    From {positions.length} short position{positions.length !== 1 ? 's' : ''}
-                  </p>
+                  <div className="flex flex-wrap items-center gap-2 text-sm">
+                    <span className={
+                      totalNetGain >= 0
+                        ? 'text-emerald-600 dark:text-emerald-400'
+                        : 'text-rose-600 dark:text-rose-400'
+                    }>
+                      From {positions.length} short position{positions.length !== 1 ? 's' : ''}
+                    </span>
+                    <span className="text-slate-500 dark:text-slate-400">
+                      ({formatSignedCurrency(totalNetGainAllTime)} all time)
+                    </span>
+                  </div>
                 </div>
               </div>
             )}
@@ -298,11 +327,22 @@ export default function HyperliquidPage() {
                 const riskLevel = getRiskLevel(position.distanceToLiquidation);
                 const priceChangePercent = ((position.markPrice - position.entryPrice) / position.entryPrice) * 100;
                 const priceToLiquidation = ((position.liquidationPrice - position.markPrice) / position.markPrice) * 100;
+                const fundingCurrent = position.fundingPnl ?? 0;
+                const fundingAllTime = position.fundingPnlAllTime ?? fundingCurrent;
+                const hyperFeesCurrent = position.hyperliquidFeesSinceChange ?? position.hyperliquidFees ?? 0;
+                const hyperFeesAllTime = position.hyperliquidFees ?? hyperFeesCurrent;
+                const binanceFeesCurrent = position.binanceEquivalentFeesSinceChange ?? position.binanceEquivalentFees ?? 0;
+                const binanceFeesAllTime = position.binanceEquivalentFees ?? binanceFeesCurrent;
+                const futureClosingFees = position.futureClosingFees ?? 0;
+                const netRevenueCurrent = position.netRevenueCurrent ?? position.netGain ?? 0;
+                const netRevenueAllTime = position.netRevenueAllTime ?? position.netGainAdjusted ?? netRevenueCurrent;
+                const netCurrentPositive = netRevenueCurrent >= 0;
+                const netAllTimePositive = netRevenueAllTime >= 0;
 
                 return (
                   <details
                     key={`${position.coin}-${index}`}
-                    className="group relative bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden hover:shadow-lg transition-all duration-300"
+                    className="group relative bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden hover:shadow-lg transition-all duration-300 open:lg:col-span-2"
                   >
                     {/* Warning Banner for High Risk */}
                     {riskLevel.level === 'critical' && (
@@ -362,12 +402,19 @@ export default function HyperliquidPage() {
 
                           if (chartRange <= 0) return null;
 
-                          const priceToPercent = (price) => (price - chartStartPrice) / chartRange * 100;
+                          const priceToPercent = (price: number) => (price - chartStartPrice) / chartRange * 100;
 
                           const entryPercent = priceToPercent(entryPrice);
                           const markPercent = priceToPercent(markPrice);
                           const liqPercent = priceToPercent(liqPrice);
                           const displayLiqPercent = Math.min(liqPercent, 95);
+                          const redZoneStart = pos5;
+                          const liqPointerPercent = (() => {
+                            const redWidth = displayLiqPercent - redZoneStart;
+                            if (redWidth <= 0) return Math.max(0, displayLiqPercent);
+                            const inset = Math.min(1.5, redWidth / 2);
+                            return Math.max(0, displayLiqPercent - inset);
+                          })();
 
                           const priceAt5Percent = liqPrice * (1 - 0.05);
                           const priceAt10Percent = liqPrice * (1 - 0.10);
@@ -378,7 +425,7 @@ export default function HyperliquidPage() {
                           const pos20 = priceToPercent(priceAt20Percent);
 
                           return (
-                            <div className="relative w-full h-16">
+                            <div className="relative w-full max-w-4xl h-16 mx-auto">
                               {/* Bar with zones */}
                               <div className="relative w-full h-8 top-4 rounded-lg overflow-hidden">
                                 <div className="absolute inset-0 flex">
@@ -409,7 +456,7 @@ export default function HyperliquidPage() {
                               </div>
 
                               {/* Liquidation Price */}
-                              <div className="absolute h-8 top-4 -translate-x-1/2" style={{ left: `${displayLiqPercent}%` }}>
+                              <div className="absolute h-8 top-4 -translate-x-1/2" style={{ left: `${liqPointerPercent}%` }}>
                                 <div className="relative w-1 h-full bg-black shadow-lg">
                                   <span className="absolute top-10 left-1/2 -translate-x-1/2 text-xs font-bold text-black dark:text-white whitespace-nowrap">
                                     Liq: {formatCurrency(liqPrice)}
@@ -478,6 +525,9 @@ export default function HyperliquidPage() {
                           }`}>
                             {(position.netGain || 0) >= 0 ? '+' : ''}{formatCurrency(position.netGain || 0)}
                           </span>
+                          <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                            ({formatSignedCurrency(netRevenueAllTime)} all time)
+                          </span>
                         </div>
                       </div>
 
@@ -514,7 +564,7 @@ export default function HyperliquidPage() {
                                   {position.fundingRate.currentRateApr >= 0 ? '+' : ''}{formatNumber(position.fundingRate.currentRateApr, 2)}%
                                 </p>
                                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                                  8hr: {position.fundingRate.currentRate >= 0 ? '+' : ''}{(position.fundingRate.currentRate * 100).toFixed(4)}%
+                                  1hr: {position.fundingRate.currentRate >= 0 ? '+' : ''}{(position.fundingRate.currentRate * 100).toFixed(4)}%
                                 </p>
                               </div>
                               <div className="text-right">
@@ -565,13 +615,7 @@ export default function HyperliquidPage() {
                               <div className="flex justify-between items-center">
                                 <span className="text-sm text-slate-600 dark:text-slate-400 font-medium">Next Funding</span>
                                 <span className="text-sm font-bold text-slate-900 dark:text-white">
-                                  {(() => {
-                                    const now = Date.now();
-                                    const diff = position.fundingRate.nextFundingTime - now;
-                                    const hours = Math.floor(diff / (1000 * 60 * 60));
-                                    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-                                    return `${hours}h ${minutes}m`;
-                                  })()}
+                                  {isClient ? formatFundingCountdown(position.fundingRate.nextFundingTime) : '--'}
                                 </span>
                               </div>
                             </div>
@@ -580,7 +624,7 @@ export default function HyperliquidPage() {
                             {position.fundingRate.history.length > 0 && (
                               <div>
                                 <p className="text-xs text-slate-500 dark:text-slate-400 mb-3 font-medium">7-Day Funding Rate Trend (APR %, 8h Avg)</p>
-                                <div className="h-24">
+                                <div className="h-48">
                                   {(() => {
                                     const history = position.fundingRate.history;
                                     
@@ -598,8 +642,8 @@ export default function HyperliquidPage() {
                                     // 2. SVG and Axis Setup
                                     const yAxisWidth = 35;
                                     const xAxisHeight = 20;
-                                    const svgWidth = 400;
-                                    const svgHeight = 96;
+                                    const svgWidth = 640;
+                                    const svgHeight = 192;
                                     const chartWidth = svgWidth - yAxisWidth;
                                     const chartHeight = svgHeight - xAxisHeight;
                                     const barGap = 2;
@@ -613,68 +657,82 @@ export default function HyperliquidPage() {
                                       const yZero = chartHeight / 2;
 
                                       return (
-                                        <svg width="100%" height={svgHeight} viewBox={`0 0 ${svgWidth} ${svgHeight}`} preserveAspectRatio="none">
-                                          {/* Y-axis */}
-                                          <g className="y-axis text-[10px] fill-slate-500 dark:fill-slate-400">
-                                            <text x={yAxisWidth - 5} y={10} textAnchor="end">{maxAbsRate.toFixed(1)}%</text>
-                                            <text x={yAxisWidth - 5} y={yZero} textAnchor="end" dy="0.3em">0%</text>
-                                            <text x={yAxisWidth - 5} y={chartHeight - 10} textAnchor="end">-{maxAbsRate.toFixed(1)}%</text>
-                                            <line x1={yAxisWidth} y1={yZero} x2={svgWidth} y2={yZero} className="stroke-slate-200 dark:stroke-slate-700" strokeWidth="1" strokeDasharray="2,2" />
-                                          </g>
-                                          {/* Chart Bars */}
-                                          <g transform={`translate(${yAxisWidth}, 0)`}>
-                                            {aggregatedHistory.map((h, i) => {
-                                              const rate = h.rateApr;
-                                              const barHeight = maxAbsRate > 0 ? (Math.abs(rate) / maxAbsRate) * yZero : 0;
-                                              const isPositive = rate >= 0;
-                                              const x = i * (barWidth + barGap);
-                                              const y = isPositive ? yZero - barHeight : yZero;
-                                              return (
-                                                <rect key={i} x={x} y={y} width={barWidth} height={barHeight} className={isPositive ? 'fill-emerald-500' : 'fill-rose-500'}>
-                                                  <title>{`${new Date(h.time).toLocaleString()}: ${h.rateApr.toFixed(2)}% APR (8h avg)`}</title>
-                                                </rect>
-                                              );
-                                            })}
-                                          </g>
-                                          {/* X-axis */}
-                                          <g className="x-axis text-[10px] fill-slate-500 dark:fill-slate-400" transform={`translate(${yAxisWidth}, ${chartHeight})`}>
-                                            {['7d', '6d', '5d', '4d', '3d', '2d', '1d'].map((label, i) => (
-                                              <text key={i} x={(i * 3 + 1.5) * (barWidth + barGap) - (barGap / 2)} y={15} textAnchor="middle">{label}</text>
-                                            ))}
-                                          </g>
-                                        </svg>
+                                        <div className="h-full w-full mx-auto" style={{ maxWidth: svgWidth }}>
+                                          <svg
+                                            width="100%"
+                                            height="100%"
+                                            viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+                                            preserveAspectRatio="xMidYMid meet"
+                                          >
+                                            {/* Y-axis */}
+                                            <g className="y-axis text-[10px] fill-slate-500 dark:fill-slate-400">
+                                              <text x={yAxisWidth - 5} y={10} textAnchor="end">{maxAbsRate.toFixed(1)}%</text>
+                                              <text x={yAxisWidth - 5} y={yZero} textAnchor="end" dy="0.3em">0%</text>
+                                              <text x={yAxisWidth - 5} y={chartHeight - 10} textAnchor="end">-{maxAbsRate.toFixed(1)}%</text>
+                                              <line x1={yAxisWidth} y1={yZero} x2={svgWidth} y2={yZero} className="stroke-slate-200 dark:stroke-slate-700" strokeWidth="1" strokeDasharray="2,2" />
+                                            </g>
+                                            {/* Chart Bars */}
+                                            <g transform={`translate(${yAxisWidth}, 0)`}>
+                                              {aggregatedHistory.map((h, i) => {
+                                                const rate = h.rateApr;
+                                                const barHeight = maxAbsRate > 0 ? (Math.abs(rate) / maxAbsRate) * yZero : 0;
+                                                const isPositive = rate >= 0;
+                                                const x = i * (barWidth + barGap);
+                                                const y = isPositive ? yZero - barHeight : yZero;
+                                                return (
+                                                  <rect key={i} x={x} y={y} width={barWidth} height={barHeight} className={isPositive ? 'fill-emerald-500' : 'fill-rose-500'}>
+                                                    <title>{`${new Date(h.time).toLocaleString()}: ${h.rateApr.toFixed(2)}% APR (8h avg)`}</title>
+                                                  </rect>
+                                                );
+                                              })}
+                                            </g>
+                                            {/* X-axis */}
+                                            <g className="x-axis text-[10px] fill-slate-500 dark:fill-slate-400" transform={`translate(${yAxisWidth}, ${chartHeight})`}>
+                                              {['7d', '6d', '5d', '4d', '3d', '2d', '1d'].map((label, i) => (
+                                                <text key={i} x={(i * 3 + 1.5) * (barWidth + barGap) - (barGap / 2)} y={15} textAnchor="middle">{label}</text>
+                                              ))}
+                                            </g>
+                                          </svg>
+                                        </div>
                                       );
                                     } else {
                                       // UNIPOLAR CHART (Only Positive)
                                       const maxRate = Math.max(...aggregatedHistory.map(x => x.rateApr), 0);
                                       return (
-                                        <svg width="100%" height={svgHeight} viewBox={`0 0 ${svgWidth} ${svgHeight}`} preserveAspectRatio="none">
-                                          {/* Y-axis */}
-                                          <g className="y-axis text-[10px] fill-slate-500 dark:fill-slate-400">
-                                            <text x={yAxisWidth - 5} y={10} textAnchor="end">{maxRate.toFixed(1)}%</text>
-                                            <text x={yAxisWidth - 5} y={chartHeight} textAnchor="end" dy="-2">{maxRate > 0 ? '0%' : ''}</text>
-                                          </g>
-                                          {/* Chart Bars */}
-                                          <g transform={`translate(${yAxisWidth}, 0)`}>
-                                            {aggregatedHistory.map((h, i) => {
-                                              const rate = h.rateApr;
-                                              const barHeight = maxRate > 0 ? (rate / maxRate) * chartHeight : 0;
-                                              const x = i * (barWidth + barGap);
-                                              const y = chartHeight - barHeight;
-                                              return (
-                                                <rect key={i} x={x} y={y} width={barWidth} height={barHeight} className="fill-emerald-500">
-                                                  <title>{`${new Date(h.time).toLocaleString()}: ${h.rateApr.toFixed(2)}% APR (8h avg)`}</title>
-                                                </rect>
-                                              );
-                                            })}
-                                          </g>
-                                          {/* X-axis */}
-                                          <g className="x-axis text-[10px] fill-slate-500 dark:fill-slate-400" transform={`translate(${yAxisWidth}, ${chartHeight})`}>
-                                            {['7d', '6d', '5d', '4d', '3d', '2d', '1d'].map((label, i) => (
-                                              <text key={i} x={(i * 3 + 1.5) * (barWidth + barGap) - (barGap / 2)} y={15} textAnchor="middle">{label}</text>
-                                            ))}
-                                          </g>
-                                        </svg>
+                                        <div className="h-full w-full mx-auto" style={{ maxWidth: svgWidth }}>
+                                          <svg
+                                            width="100%"
+                                            height="100%"
+                                            viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+                                            preserveAspectRatio="xMidYMid meet"
+                                          >
+                                            {/* Y-axis */}
+                                            <g className="y-axis text-[10px] fill-slate-500 dark:fill-slate-400">
+                                              <text x={yAxisWidth - 5} y={10} textAnchor="end">{maxRate.toFixed(1)}%</text>
+                                              <text x={yAxisWidth - 5} y={chartHeight} textAnchor="end" dy="-2">{maxRate > 0 ? '0%' : ''}</text>
+                                            </g>
+                                            {/* Chart Bars */}
+                                            <g transform={`translate(${yAxisWidth}, 0)`}>
+                                              {aggregatedHistory.map((h, i) => {
+                                                const rate = h.rateApr;
+                                                const barHeight = maxRate > 0 ? (rate / maxRate) * chartHeight : 0;
+                                                const x = i * (barWidth + barGap);
+                                                const y = chartHeight - barHeight;
+                                                return (
+                                                  <rect key={i} x={x} y={y} width={barWidth} height={barHeight} className="fill-emerald-500">
+                                                    <title>{`${new Date(h.time).toLocaleString()}: ${h.rateApr.toFixed(2)}% APR (8h avg)`}</title>
+                                                  </rect>
+                                                );
+                                              })}
+                                            </g>
+                                            {/* X-axis */}
+                                            <g className="x-axis text-[10px] fill-slate-500 dark:fill-slate-400" transform={`translate(${yAxisWidth}, ${chartHeight})`}>
+                                              {['7d', '6d', '5d', '4d', '3d', '2d', '1d'].map((label, i) => (
+                                                <text key={i} x={(i * 3 + 1.5) * (barWidth + barGap) - (barGap / 2)} y={15} textAnchor="middle">{label}</text>
+                                              ))}
+                                            </g>
+                                          </svg>
+                                        </div>
                                       );
                                     }
                                   })()}
@@ -787,85 +845,146 @@ export default function HyperliquidPage() {
                           <h4 className="text-sm font-bold text-slate-700 dark:text-slate-300">Revenue & Fees</h4>
                         </div>
 
-                        <div className="bg-white dark:bg-slate-800 rounded-lg p-6 border border-slate-200 dark:border-slate-700 space-y-3">
-                          {/* Funding Revenue */}
-                          <div className="flex justify-between items-center bg-emerald-50/50 dark:bg-emerald-950/20 rounded-lg p-4 border border-emerald-200/30 dark:border-emerald-700/30">
-                            <span className="text-sm text-emerald-700 dark:text-emerald-400 font-medium">Funding Revenue</span>
-                            <span className="font-mono text-base font-semibold text-emerald-600 dark:text-emerald-400">
-                              +{formatCurrency(position.fundingPnl || 0)}
-                            </span>
-                          </div>
-
-                          {/* Hyperliquid Fees */}
-                          <div className="flex justify-between items-center bg-rose-50/50 dark:bg-rose-950/20 rounded-lg p-4 border border-rose-200/30 dark:border-rose-700/30">
+                        <div className="bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 p-6 space-y-6">
+                          <div className="grid gap-4 md:grid-cols-2">
                             <div>
-                              <span className="text-sm text-rose-700 dark:text-rose-400 font-medium">Hyperliquid Fees</span>
-                              <span className="text-xs text-slate-500 dark:text-slate-400 ml-2">({position.tradeCount || 0} trades)</span>
+                              <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 tracking-wide uppercase">Since Last Change</p>
+                              <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+                                Snapshot from the most recent position size update.
+                              </p>
                             </div>
-                            <span className="font-mono text-base font-semibold text-rose-600 dark:text-rose-400">
-                              -{formatCurrency(position.hyperliquidFees || 0)}
-                            </span>
-                          </div>
-
-                          {/* Binance Equivalent Fees */}
-                          <div className="flex justify-between items-center bg-rose-50/50 dark:bg-rose-950/20 rounded-lg p-4 border border-rose-200/30 dark:border-rose-700/30">
                             <div>
-                              <span className="text-sm text-rose-700 dark:text-rose-400 font-medium">Binance Equiv. Fees</span>
-                              <span className="text-xs text-slate-500 dark:text-slate-400 ml-2">(0.1% SPOT)</span>
+                              <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 tracking-wide uppercase">All Time</p>
+                              <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+                                Cumulative performance across the full history of this pair.
+                              </p>
                             </div>
-                            <span className="font-mono text-base font-semibold text-rose-600 dark:text-rose-400">
-                              -{formatCurrency(position.binanceEquivalentFees || 0)}
-                            </span>
                           </div>
 
-                          {/* Future Closing Fees */}
-                          <div className="flex justify-between items-center bg-amber-50/50 dark:bg-amber-950/20 rounded-lg p-4 border border-amber-200/30 dark:border-amber-700/30">
-                            <div>
-                              <span className="text-sm text-amber-700 dark:text-amber-400 font-medium">Future Closing Fees</span>
-                              <span className="text-xs text-slate-500 dark:text-slate-400 ml-2">(Est.)</span>
-                            </div>
-                            <span className="font-mono text-base font-semibold text-amber-600 dark:text-amber-400">
-                              -{formatCurrency(position.futureClosingFees || 0)}
-                            </span>
-                          </div>
-
-                          {/* Delta Imbalance Exposure (if exists) */}
-                          {(position.deltaImbalanceValue || 0) > 0.01 && (
-                            <div className="flex justify-between items-center bg-yellow-50/50 dark:bg-yellow-950/20 rounded-lg p-4 border border-yellow-200/30 dark:border-yellow-700/30">
-                              <div>
-                                <span className="text-sm text-yellow-700 dark:text-yellow-400 font-medium">Position Imbalance</span>
-                                <span className="text-xs text-slate-500 dark:text-slate-400 ml-2">
-                                  ({Math.abs(position.deltaImbalance || 0).toFixed(2)} {position.coin})
+                          <div className="grid gap-4 md:grid-cols-2">
+                            <div className="rounded-lg border border-emerald-200/30 dark:border-emerald-700/30 bg-emerald-50/50 dark:bg-emerald-950/10 p-4">
+                              <div className="flex items-center justify-between">
+                                <span className="text-sm font-semibold text-emerald-700 dark:text-emerald-400">Funding Revenue</span>
+                                <span className="font-mono text-base font-semibold text-emerald-600 dark:text-emerald-400">
+                                  {formatSignedCurrency(fundingCurrent)}
                                 </span>
                               </div>
-                              <span className="font-mono text-sm font-semibold text-yellow-600 dark:text-yellow-400">
-                                Risk: {formatCurrency(position.deltaImbalanceValue || 0)}
+                            </div>
+                            <div className="rounded-lg border border-emerald-200/30 dark:border-emerald-700/30 bg-emerald-50/50 dark:bg-emerald-950/10 p-4">
+                              <div className="flex items-center justify-between">
+                                <span className="text-sm font-semibold text-emerald-700 dark:text-emerald-400">Funding Revenue</span>
+                                <span className="font-mono text-base font-semibold text-emerald-600 dark:text-emerald-400">
+                                  {formatSignedCurrency(fundingAllTime)}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="grid gap-4 md:grid-cols-2">
+                            <div className="flex items-center justify-between rounded-lg border border-rose-200/40 dark:border-rose-700/30 bg-rose-50/40 dark:bg-rose-950/20 p-4">
+                              <span className="text-sm font-medium text-rose-700 dark:text-rose-400">Hyperliquid Fees</span>
+                              <span className="font-mono text-base font-semibold text-rose-600 dark:text-rose-400">
+                                -{formatCurrency(hyperFeesCurrent)}
                               </span>
                             </div>
-                          )}
+                            <div className="flex items-center justify-between rounded-lg border border-rose-200/40 dark:border-rose-700/30 bg-rose-50/40 dark:bg-rose-950/20 p-4">
+                              <div>
+                                <span className="text-sm font-medium text-rose-700 dark:text-rose-400">Hyperliquid Fees</span>
+                                <span className="block text-xs text-slate-500 dark:text-slate-400">({position.tradeCount || 0} trades)</span>
+                              </div>
+                              <span className="font-mono text-base font-semibold text-rose-600 dark:text-rose-400">
+                                -{formatCurrency(hyperFeesAllTime)}
+                              </span>
+                            </div>
+                          </div>
 
-                          {/* Net Gain/Loss Summary */}
-                          <div className={`flex justify-between items-center rounded-lg p-5 mt-4 border ${
-                            (position.netGain || 0) >= 0
-                              ? 'bg-emerald-50/50 dark:bg-emerald-950/20 border-emerald-500/30'
-                              : 'bg-rose-50/50 dark:bg-rose-950/20 border-rose-500/30'
-                          }`}>
-                            <span className={`text-sm font-bold ${
-                              (position.netGain || 0) >= 0
-                                ? 'text-emerald-700 dark:text-emerald-400'
-                                : 'text-rose-700 dark:text-rose-400'
+                          <div className="grid gap-4 md:grid-cols-2">
+                            <div className="flex items-center justify-between rounded-lg border border-rose-200/40 dark:border-rose-700/30 bg-rose-50/40 dark:bg-rose-950/20 p-4">
+                              <div>
+                                <span className="text-sm font-medium text-rose-700 dark:text-rose-400">Binance Equiv. Fees</span>
+                                <span className="block text-xs text-slate-500 dark:text-slate-400">(0.1% SPOT)</span>
+                              </div>
+                              <span className="font-mono text-base font-semibold text-rose-600 dark:text-rose-400">
+                                -{formatCurrency(binanceFeesCurrent)}
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between rounded-lg border border-rose-200/40 dark:border-rose-700/30 bg-rose-50/40 dark:bg-rose-950/20 p-4">
+                              <div>
+                                <span className="text-sm font-medium text-rose-700 dark:text-rose-400">Binance Equiv. Fees</span>
+                                <span className="block text-xs text-slate-500 dark:text-slate-400">(0.1% SPOT)</span>
+                              </div>
+                              <span className="font-mono text-base font-semibold text-rose-600 dark:text-rose-400">
+                                -{formatCurrency(binanceFeesAllTime)}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="grid gap-4 md:grid-cols-2">
+                            <div className="flex items-center justify-between rounded-lg border border-amber-200/40 dark:border-amber-700/30 bg-amber-50/40 dark:bg-amber-950/10 p-4">
+                              <div>
+                                <span className="text-sm font-medium text-amber-700 dark:text-amber-400">Future Closing Fees</span>
+                                <span className="block text-xs text-slate-500 dark:text-slate-400">(Est.)</span>
+                              </div>
+                              <span className="font-mono text-base font-semibold text-amber-600 dark:text-amber-400">
+                                -{formatCurrency(futureClosingFees)}
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between rounded-lg border border-amber-200/40 dark:border-amber-700/30 bg-amber-50/40 dark:bg-amber-950/10 p-4">
+                              <div>
+                                <span className="text-sm font-medium text-amber-700 dark:text-amber-400">Future Closing Fees</span>
+                                <span className="block text-xs text-slate-500 dark:text-slate-400">(Est.)</span>
+                              </div>
+                              <span className="font-mono text-base font-semibold text-amber-600 dark:text-amber-400">
+                                -{formatCurrency(futureClosingFees)}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="grid gap-4 md:grid-cols-2">
+                            <div className={`rounded-lg p-5 border ${
+                              netCurrentPositive
+                                ? 'bg-emerald-50/70 dark:bg-emerald-950/20 border-emerald-500/30'
+                                : 'bg-rose-50/70 dark:bg-rose-950/20 border-rose-500/30'
                             }`}>
-                              NET {(position.netGain || 0) >= 0 ? 'GAIN' : 'LOSS'}
-                            </span>
-                            <span className={`font-mono text-xl font-bold ${
-                              (position.netGain || 0) >= 0
-                                ? 'text-emerald-600 dark:text-emerald-400'
-                                : 'text-rose-600 dark:text-rose-400'
+                              <p className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400">Net Gain</p>
+                              <p className={`mt-1 text-lg font-bold ${
+                                netCurrentPositive
+                                  ? 'text-emerald-600 dark:text-emerald-400'
+                                  : 'text-rose-600 dark:text-rose-400'
+                              }`}>
+                                {formatSignedCurrency(netRevenueCurrent)}
+                              </p>
+                            </div>
+                            <div className={`rounded-lg p-5 border ${
+                              netAllTimePositive
+                                ? 'bg-emerald-50/70 dark:bg-emerald-950/20 border-emerald-500/30'
+                                : 'bg-rose-50/70 dark:bg-rose-950/20 border-rose-500/30'
                             }`}>
-                              {(position.netGain || 0) >= 0 ? '+' : ''}{formatCurrency(position.netGain || 0)}
-                            </span>
+                              <p className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400">Net Gain</p>
+                              <p className={`mt-1 text-lg font-bold ${
+                                netAllTimePositive
+                                  ? 'text-emerald-600 dark:text-emerald-400'
+                                  : 'text-rose-600 dark:text-rose-400'
+                              }`}>
+                                {formatSignedCurrency(netRevenueAllTime)}
+                              </p>
+                            </div>
                           </div>
                         </div>
+
+                        {(position.deltaImbalanceValue || 0) > 0.01 && (
+                          <div className="flex justify-between items-center bg-yellow-50/50 dark:bg-yellow-950/20 rounded-lg p-4 border border-yellow-200/30 dark:border-yellow-700/30">
+                            <div>
+                              <span className="text-sm text-yellow-700 dark:text-yellow-400 font-medium">Position Imbalance</span>
+                              <span className="text-xs text-slate-500 dark:text-slate-400 ml-2">
+                                ({Math.abs(position.deltaImbalance || 0).toFixed(2)} {position.coin})
+                              </span>
+                            </div>
+                            <span className="font-mono text-sm font-semibold text-yellow-600 dark:text-yellow-400">
+                              Risk: {formatCurrency(position.deltaImbalanceValue || 0)}
+                            </span>
+                          </div>
+                        )}
                       </div>
 
                       {/* SECTION 4: Price Analysis */}

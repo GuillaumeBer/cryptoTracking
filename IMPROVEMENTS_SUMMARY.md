@@ -1,4 +1,4 @@
-# Codebase Improvements Summary
+﻿# Codebase Improvements Summary
 
 ## Overview
 This document summarizes all improvements and cleanup performed on the crypto-tracking codebase.
@@ -10,7 +10,7 @@ This document summarizes all improvements and cleanup performed on the crypto-tr
 
 ## Latest Improvements (2025-10-07)
 
-### 🚀 Price Service Enhancements
+### ðŸš€ Price Service Enhancements
 
 #### 1. Wrapped Token Unwrapping
 - Added automatic token unwrapping for wBNB, wSOL, sAVAX, wS
@@ -21,7 +21,7 @@ This document summarizes all improvements and cleanup performed on the crypto-tr
 #### 2. Critical Bug Fix: WBNB Price Mapping
 - **Problem**: WBNB was using fallback price ($620) instead of Binance price
 - **Fix**: Batch price fetch now correctly uses `binanceMap`
-- **Impact**: WBNB price $620 → $1,190 (92% accuracy improvement!)
+- **Impact**: WBNB price $620 â†’ $1,190 (92% accuracy improvement!)
 - **Result**: BNB Chain health factors now accurately reflect collateral value
 
 #### 3. Performance Optimization
@@ -38,11 +38,32 @@ This document summarizes all improvements and cleanup performed on the crypto-tr
 
 ---
 
-## Previous Improvements (2025-10-05)
+## Research Insights (2025-10-07)
 
----
+### Delta-Neutral Scouting Engine Exploration
+- Audited current Hyperliquid imbalance logic (`backend/src/routes/hyperliquid.ts`, `frontend/app/hyperliquid/page.tsx`) to map hand-off points for expanded analytics.
+- Drafted architecture for a venue-agnostic engine: shared perp adapter layer (funding, fees, liquidity, API health), carry scoring (net funding minus borrow costs, fees, hedging drag), and alerting hooks for liquidation and decay risk.
+- Proposed UI flow: opportunity hub (ranked spreads), strategy composer (hedge sizing and stress tests), position monitor (PnL + health telemetry), and timeline view for yield decay and funding flips.
 
-## ✅ Files Deleted (Cleanup)
+### Emerging Perpetuals DEX Opportunities
+- **Aster** (BSC/Ethereum/Solana/Base/opBNB): extreme volume growth but thin perp TVL; supports hidden orders and yield-bearing margin assets (CCN 2025-10-02, TrendingInCrypto 2025-09-30, DefiLlama `protocol/aster`).
+- **Avantis** (Base): perps + options hub with fee-sharing vaults and synthetic markets suited for diversified hedges (DefiLlama `protocol/avantis`).
+- **Jupiter Perps** (Solana): leverages Solana routing dominance; pending SDK support for borrow data aligns with future multi-chain delta-neutral plays (TrendingInCrypto 2025-09-30).
+- **SynFutures v3** (Blast/Base): permissionless listings for long-tail hedges; integrates Pyth and Chainlink feeds (DefiLlama `protocol/synfutures`).
+
+
+### Hyperliquid UX Backlog Alignment
+- Phase 1 focus (Funding & APY tracker, Liquidation Risk monitor, Auto-Close recommendations) confirmed from `CLAUDE.md`.
+- Phase 2 high-value cards (ROI & break-even analysis, Position health score, Funding vs. unrealized PnL comparison) slated once core telemetry ships.
+- Phase 3 optimization modules (Delta imbalance impact, Fee breakdown & optimization, Cross-position portfolio and historical performance) earmarked as long-term roadmap items.
+
+### Next Steps
+- `Perp connectors` - execute the plan outlined in `docs/PERP_CONNECTOR_SPECS.md`: finalize specs for Aster, Avantis, Jupiter Perps, and SynFutures, then stub adapters with health checks and sandbox data captures.
+- `Analytics backtesting` – assemble 90-day funding/borrow time series, validate the spread scoring formula against historical trades, and publish calibration notes.
+- `Scouting UI` – design the Emerging Venues panel plus the Phase 1 Hyperliquid cards, and wire them to mocked data so UX can iterate ahead of live feeds.
+- `Risk telemetry` – define alert thresholds for liquidation distance, funding decay, and delta imbalance; ensure telemetry hooks are ready for connector outputs.
+- `Docs & QA` – update product/engineering docs as connectors land, add regression smoke checks for the new adapters, and track open issues in the roadmap.
+## âœ… Files Deleted (Cleanup)
 
 ### Removed Files
 1. **`nul`** - Windows error output file (no purpose)
@@ -56,17 +77,17 @@ This document summarizes all improvements and cleanup performed on the crypto-tr
 
 ---
 
-## 🔐 Security Improvements
+## ðŸ” Security Improvements
 
 ### 1. Environment Variables
 **Before**: API keys hardcoded in source files
 ```typescript
-const GRAPH_API_KEY = 'dec44da04027010f04ba25886c2d62ab'; // ❌ Hardcoded
+const GRAPH_API_KEY = 'dec44da04027010f04ba25886c2d62ab'; // âŒ Hardcoded
 ```
 
 **After**: Environment variables
 ```typescript
-const GRAPH_API_KEY = process.env.GRAPH_API_KEY || ''; // ✅ From .env
+const GRAPH_API_KEY = process.env.GRAPH_API_KEY || ''; // âœ… From .env
 ```
 
 **Files Changed**:
@@ -76,7 +97,7 @@ const GRAPH_API_KEY = process.env.GRAPH_API_KEY || ''; // ✅ From .env
 
 ---
 
-## 🏗️ Architecture Improvements
+## ðŸ—ï¸ Architecture Improvements
 
 ### 1. Frontend API Configuration
 **Created**: [frontend/lib/api-config.ts](frontend/lib/api-config.ts)
@@ -106,19 +127,19 @@ NEXT_PUBLIC_API_URL=http://localhost:3001
 
 ---
 
-## 🔧 Code Quality Improvements
+## ðŸ”§ Code Quality Improvements
 
 ### 1. Removed Hardcoded Values
 
 #### Frontend Wallet Addresses
 **Before**:
 ```typescript
-const [walletAddress, setWalletAddress] = useState('0x3c74c735b5863C0baF52598d8Fd2D59611c8320F'); // ❌
+const [walletAddress, setWalletAddress] = useState('0x3c74c735b5863C0baF52598d8Fd2D59611c8320F'); // âŒ
 ```
 
 **After**:
 ```typescript
-const [walletAddress, setWalletAddress] = useState(''); // ✅ Empty default
+const [walletAddress, setWalletAddress] = useState(''); // âœ… Empty default
 ```
 
 **Files Changed**:
@@ -128,12 +149,12 @@ const [walletAddress, setWalletAddress] = useState(''); // ✅ Empty default
 #### Frontend API URLs
 **Before**:
 ```typescript
-fetch(`http://localhost:3001/api/morpho?address=${walletAddress}`) // ❌ Hardcoded
+fetch(`http://localhost:3001/api/morpho?address=${walletAddress}`) // âŒ Hardcoded
 ```
 
 **After**:
 ```typescript
-fetch(endpoints.morpho(walletAddress)) // ✅ From config
+fetch(endpoints.morpho(walletAddress)) // âœ… From config
 ```
 
 **Files Changed**:
@@ -154,12 +175,12 @@ export interface HyperliquidClearinghouseState {
 
 **Before**:
 ```typescript
-const data: any = await response.json(); // ❌
+const data: any = await response.json(); // âŒ
 ```
 
 **After**:
 ```typescript
-const data = await response.json() as HyperliquidClearinghouseState; // ✅
+const data = await response.json() as HyperliquidClearinghouseState; // âœ…
 ```
 
 **Files Changed**:
@@ -167,15 +188,15 @@ const data = await response.json() as HyperliquidClearinghouseState; // ✅
 
 ---
 
-## 📚 Documentation
+## ðŸ“š Documentation
 
 ### New Documentation Structure
 
 ```
 docs/
-├── ARCHITECTURE.md         # System architecture (NEW)
-├── API.md                  # Complete API reference (NEW)
-└── JUPITER_LEND_INTEGRATION.md  # Moved from root
+â”œâ”€â”€ ARCHITECTURE.md         # System architecture (NEW)
+â”œâ”€â”€ API.md                  # Complete API reference (NEW)
+â””â”€â”€ JUPITER_LEND_INTEGRATION.md  # Moved from root
 ```
 
 ### 1. Architecture Documentation
@@ -231,7 +252,7 @@ Frontend-specific docs:
 
 ---
 
-## 🔒 Git & Security
+## ðŸ”’ Git & Security
 
 ### .gitignore Updates
 **Updated**: [.gitignore](.gitignore)
@@ -253,7 +274,7 @@ Added:
 
 ---
 
-## 📊 Summary Statistics
+## ðŸ“Š Summary Statistics
 
 ### Files Created
 - 7 new documentation files
@@ -277,26 +298,26 @@ Added:
 
 ---
 
-## 🎯 Key Improvements
+## ðŸŽ¯ Key Improvements
 
-### Security ✅
+### Security âœ…
 - [x] Moved API keys to environment variables
 - [x] Created .env.example templates
 - [x] Updated .gitignore
 
-### Code Quality ✅
+### Code Quality âœ…
 - [x] Removed hardcoded values
 - [x] Centralized API configuration
 - [x] Added proper TypeScript types
 - [x] Removed unused files
 
-### Documentation ✅
+### Documentation âœ…
 - [x] Created comprehensive architecture docs
 - [x] Complete API documentation
 - [x] Updated all README files
 - [x] Organized docs folder
 
-### Developer Experience ✅
+### Developer Experience âœ…
 - [x] Clear setup instructions
 - [x] Environment variable examples
 - [x] Better project structure
@@ -304,7 +325,7 @@ Added:
 
 ---
 
-## 🚀 Next Steps (Optional)
+## ðŸš€ Next Steps (Optional)
 
 ### Recommended Future Enhancements
 
@@ -332,7 +353,7 @@ Added:
 
 ---
 
-## 📝 Migration Checklist
+## ðŸ“ Migration Checklist
 
 For team members pulling these changes:
 
@@ -347,7 +368,7 @@ For team members pulling these changes:
 
 ---
 
-## ✨ Benefits
+## âœ¨ Benefits
 
 ### For Developers
 - **Cleaner codebase** - No unnecessary files
@@ -368,11 +389,11 @@ For team members pulling these changes:
 
 ---
 
-**All improvements completed successfully! 🎉**
+**All improvements completed successfully! ðŸŽ‰**
 
 The codebase is now production-ready with:
-- ✅ Security best practices
-- ✅ Clean architecture
-- ✅ Comprehensive documentation
-- ✅ Type safety
-- ✅ Developer-friendly setup
+- âœ… Security best practices
+- âœ… Clean architecture
+- âœ… Comprehensive documentation
+- âœ… Type safety
+- âœ… Developer-friendly setup

@@ -9,6 +9,7 @@ import onchainRouter from './routes/onchain';
 import bnbScanRouter from './routes/bnb-scan';
 import pricesRouter from './routes/prices';
 import portfolioRouter from './routes/portfolio';
+import perpConnectorsRouter from './routes/perp-connectors';
 import { validatePriceApiConfig } from './config/price-api.config';
 
 dotenv.config();
@@ -37,6 +38,7 @@ app.use('/api/onchain', onchainRouter);
 app.use('/api/bnb-scan', bnbScanRouter);
 app.use('/api/prices', pricesRouter);
 app.use('/api/portfolio', portfolioRouter);
+app.use('/api/perp-connectors', perpConnectorsRouter);
 
 // Health check
 app.get('/health', (req: Request, res: Response) => {
