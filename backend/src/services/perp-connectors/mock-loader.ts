@@ -30,6 +30,7 @@ interface RawMockFeed {
 const DEFAULT_RELATIVE_PATH = ['mocks', 'perp_feeds', 'sample_feeds.json'];
 
 let cachedFeed: { data: RawMockFeed; mtimeMs: number } | null = null;
+let warnedOnce = false;
 
 function readMockFeedFile(): RawMockFeed {
   const customPath = process.env.PERP_MOCK_PATH;
@@ -42,9 +43,11 @@ function readMockFeedFile(): RawMockFeed {
 
   candidatePaths.push(
     path.resolve(process.cwd(), ...DEFAULT_RELATIVE_PATH),
+    path.resolve(process.cwd(), '..', ...DEFAULT_RELATIVE_PATH),
     path.resolve(__dirname, '../../../', ...DEFAULT_RELATIVE_PATH),
     path.resolve(__dirname, '../../../../', ...DEFAULT_RELATIVE_PATH),
-    path.resolve(__dirname, '../../../../../', ...DEFAULT_RELATIVE_PATH) // in case CWD is backend/dist
+    path.resolve(__dirname, '../../../../../', ...DEFAULT_RELATIVE_PATH),
+    path.resolve(__dirname, '../../../../../../', ...DEFAULT_RELATIVE_PATH)
   );
 
   let filePath: string | null = null;
@@ -57,7 +60,11 @@ function readMockFeedFile(): RawMockFeed {
   }
 
   if (!filePath) {
-    throw new Error(`Perp mock feed not found. Checked: ${candidatePaths.join(', ')}. Set PERP_MOCK_PATH or generate mock data.`);
+    if (!warnedOnce) {
+      console.warn('[perp-mock-loader] mock feed not found. Checked paths:', candidatePaths);
+      warnedOnce = true;
+    }
+    throw new Error(`Perp mock feed not found. Set PERP_MOCK_PATH or generate mock data.`);
   }
 
   const stats = fs.statSync(filePath);
