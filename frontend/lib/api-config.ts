@@ -14,4 +14,6 @@ export const endpoints = {
   bnbScan: (address: string) => `${API_BASE_URL}/api/bnb-scan?address=${address}`,
   prices: () => `${API_BASE_URL}/api/prices`,
   portfolio: () => `${API_BASE_URL}/api/portfolio`,
+  perpConnectors: (mode: 'auto' | 'mock' | 'live' = 'auto') =>
+    `${API_BASE_URL}/api/perp-connectors?mode=${mode}`,
 };

@@ -51,6 +51,44 @@ interface HyperliquidPosition {
   fundingRate?: FundingRateData;
 }
 
+interface PerpMarketData {
+  symbol: string;
+  markPrice: number;
+  fundingRateHourly: number;
+  fundingRateAnnualized: number;
+  openInterestUsd: number;
+  takerFeeBps: number;
+  makerFeeBps: number;
+  minQty: number;
+  depthTop5: Array<{ side: 'bid' | 'ask'; price: number; size: number }>;
+  extra?: Record<string, unknown>;
+}
+
+interface PerpConnectorMeta {
+  id: string;
+  name: string;
+  description: string;
+  website?: string;
+  docs?: string;
+  requiresApiKey: boolean;
+}
+
+interface PerpConnectorResult {
+  meta: PerpConnectorMeta;
+  markets: PerpMarketData[];
+  lastUpdated: string;
+  source: 'mock' | 'live';
+}
+
+interface PerpConnectorSummary {
+  id: string;
+  name: string;
+  requiresApiKey: boolean;
+  lastUpdated: string;
+  marketCount: number;
+  source: 'mock' | 'live';
+}
+
 export default function HyperliquidPage() {
   const [walletAddress, setWalletAddress] = useState(process.env.NEXT_PUBLIC_DEFAULT_EVM_ADDRESS || '');
   const [positions, setPositions] = useState<HyperliquidPosition[]>([]);
@@ -61,6 +99,11 @@ export default function HyperliquidPage() {
   const [totalNetGain, setTotalNetGain] = useState(0);
   const [totalNetGainAllTime, setTotalNetGainAllTime] = useState(0);
   const [isClient, setIsClient] = useState(false);
+  const [perpConnectors, setPerpConnectors] = useState<PerpConnectorResult[]>([]);
+  const [perpSummary, setPerpSummary] = useState<PerpConnectorSummary[]>([]);
+  const [perpMode, setPerpMode] = useState<'auto' | 'mock' | 'live'>('auto');
+  const [perpLoading, setPerpLoading] = useState(false);
+  const [perpError, setPerpError] = useState<string | null>(null);
 
   const fetchPositions = async () => {
     if (!walletAddress) {
@@ -114,6 +157,32 @@ export default function HyperliquidPage() {
     setIsClient(true);
   }, []);
 
+  const fetchPerpConnectors = async (mode: 'auto' | 'mock' | 'live' = 'auto') => {
+    setPerpLoading(true);
+    setPerpError(null);
+    try {
+      const response = await fetch(endpoints.perpConnectors(mode));
+      if (!response.ok) {
+        throw new Error(`Failed to fetch connectors: ${response.statusText}`);
+      }
+      const data = await response.json();
+      setPerpConnectors(data.connectors || []);
+      setPerpSummary(data.summary || []);
+      setPerpMode(data.mode || mode);
+    } catch (err) {
+      setPerpError(err instanceof Error ? err.message : 'Unable to load perp connectors');
+    } finally {
+      setPerpLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchPerpConnectors('auto');
+    const interval = setInterval(() => fetchPerpConnectors('auto'), 60_000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const formatNumber = (value: number, decimals: number = 2) => {
     return new Intl.NumberFormat('en-US', {
       minimumFractionDigits: 0,
@@ -132,6 +201,10 @@ export default function HyperliquidPage() {
   const formatSignedCurrency = (value: number) => {
     const sign = value >= 0 ? '+' : '-';
     return `${sign}${formatCurrency(value)}`;
+  };
+
+  const formatPercent = (value: number, decimals: number = 2) => {
+    return `${formatNumber(value * 100, decimals)}%`;
   };
 
   const getRiskLevel = (distancePercent: number) => {
@@ -177,6 +250,110 @@ export default function HyperliquidPage() {
   const totalUnrealizedPnl = positions.reduce((sum, pos) => sum + pos.unrealizedPnl, 0);
   const deltaNeutralPositions = positions.filter(p => p.isDeltaNeutral);
 
+  const renderConnectorCard = (connector: PerpConnectorResult, summary: PerpConnectorSummary | undefined) => {
+    const topMarkets = [...connector.markets]
+      .sort((a, b) => b.fundingRateAnnualized - a.fundingRateAnnualized)
+      .slice(0, 3);
+
+    return (
+      <div
+        key={connector.meta.id}
+        className="rounded-2xl border border-slate-200/60 dark:border-slate-700/60 bg-white/60 dark:bg-slate-900/40 shadow-sm hover:shadow-md transition-shadow duration-200 flex flex-col"
+      >
+        <div className="p-5 border-b border-slate-200/60 dark:border-slate-700/60">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-lg font-semibold text-slate-900 dark:text-white">{connector.meta.name}</h3>
+              <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+                {connector.meta.description}
+              </p>
+              <div className="flex flex-wrap items-center gap-3 mt-3 text-xs text-slate-500 dark:text-slate-400">
+                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-slate-100 dark:bg-slate-800">
+                  <span className="h-2 w-2 rounded-full bg-emerald-500"></span>
+                  {summary?.source === 'live' ? 'Live feed' : 'Mock feed'}
+                </span>
+                {connector.meta.requiresApiKey && (
+                  <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300">
+                    API key required
+                  </span>
+                )}
+                {summary?.lastUpdated && (
+                  <span>Updated {new Date(summary.lastUpdated).toLocaleTimeString()}</span>
+                )}
+                {summary?.marketCount !== undefined && (
+                  <span>{summary.marketCount} markets</span>
+                )}
+              </div>
+            </div>
+            <div className="flex flex-col items-end gap-2">
+              {connector.meta.website && (
+                <a
+                  href={connector.meta.website}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-slate-500 hover:text-slate-900 dark:hover:text-slate-200"
+                >
+                  Website
+                </a>
+              )}
+              {connector.meta.docs && (
+                <a
+                  href={connector.meta.docs}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-slate-500 hover:text-slate-900 dark:hover:text-slate-200"
+                >
+                  Docs
+                </a>
+              )}
+            </div>
+          </div>
+        </div>
+        <div className="p-5 space-y-4 grow">
+          {topMarkets.length === 0 ? (
+            <p className="text-sm text-slate-500 dark:text-slate-400">
+              No market data available.
+            </p>
+          ) : (
+            topMarkets.map(market => (
+              <div
+                key={`${connector.meta.id}-${market.symbol}`}
+                className="flex flex-col gap-2 rounded-xl border border-slate-200/50 dark:border-slate-700/60 bg-slate-50/60 dark:bg-slate-900/40 px-4 py-3"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-semibold text-slate-900 dark:text-white">{market.symbol}</span>
+                  <span className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
+                    {formatPercent(market.fundingRateAnnualized)}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-3 text-xs text-slate-500 dark:text-slate-400">
+                  <div>
+                    <span className="block font-medium text-slate-600 dark:text-slate-300">Open Interest</span>
+                    <span>{formatCurrency(market.openInterestUsd)}</span>
+                  </div>
+                  <div>
+                    <span className="block font-medium text-slate-600 dark:text-slate-300">Mark Price</span>
+                    <span>{formatCurrency(market.markPrice)}</span>
+                  </div>
+                  <div>
+                    <span className="block font-medium text-slate-600 dark:text-slate-300">Fees</span>
+                    <span>
+                      Maker {formatNumber(market.makerFeeBps / 100, 2)} bps · Taker {formatNumber(market.takerFeeBps / 100, 2)} bps
+                    </span>
+                  </div>
+                  <div>
+                    <span className="block font-medium text-slate-600 dark:text-slate-300">Min Qty</span>
+                    <span>{market.minQty}</span>
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-900 p-6 sm:p-8 transition-colors duration-200">
       <div className="max-w-7xl mx-auto">
@@ -196,6 +373,72 @@ export default function HyperliquidPage() {
             <h1 className="text-4xl sm:text-5xl font-bold text-slate-900 dark:text-white">
               Hyperliquid Delta Neutral
             </h1>
+
+            <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800/70 bg-white/70 dark:bg-slate-900/50 shadow-sm">
+              <div className="p-5 border-b border-slate-200/60 dark:border-slate-800/60 flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Emerging Perp Venues</h2>
+                  <p className="text-sm text-slate-500 dark:text-slate-400">
+                    Aggregated funding and liquidity scouting across connectors. Mode: <span className="font-medium">{perpMode}</span>
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <div className="flex rounded-full border border-slate-200 dark:border-slate-700 bg-slate-100/60 dark:bg-slate-800/50 p-1">
+                    {(['auto', 'mock', 'live'] as const).map(mode => (
+                      <button
+                        key={mode}
+                        onClick={() => fetchPerpConnectors(mode)}
+                        className={`px-3 py-1 text-xs font-medium rounded-full transition-colors duration-150 ${
+                          perpMode === mode
+                            ? 'bg-slate-900 text-white dark:bg-white dark:text-slate-900'
+                            : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100'
+                        }`}
+                      >
+                        {mode.toUpperCase()}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    onClick={() => fetchPerpConnectors(perpMode)}
+                    className="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium rounded-full border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                  >
+                    <svg className={`w-3.5 h-3.5 ${perpLoading ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582M20 20v-5h-.581M5.5 9A7.5 7.5 0 0117 6.5M18.5 15A7.5 7.5 0 017 17.5" />
+                    </svg>
+                    Refresh
+                  </button>
+                </div>
+              </div>
+
+              {perpError && (
+                <div className="px-5 py-3 text-sm text-rose-600 dark:text-rose-400 border-b border-rose-200/60 dark:border-rose-900/40 bg-rose-50/50 dark:bg-rose-950/20">
+                  {perpError}
+                </div>
+              )}
+
+              <div className="p-5">
+                {perpLoading && perpConnectors.length === 0 ? (
+                  <div className="flex items-center gap-3 text-sm text-slate-500 dark:text-slate-400">
+                    <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v4m0 8v4m8-8h-4M8 12H4" />
+                    </svg>
+                    Loading connector data...
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+                    {perpConnectors.map(connector => renderConnectorCard(
+                      connector,
+                      perpSummary.find(item => item.id === connector.meta.id)
+                    ))}
+                    {perpConnectors.length === 0 && !perpLoading && (
+                      <p className="text-sm text-slate-500 dark:text-slate-400">
+                        No connector data available yet.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
 
             {positions.length > 0 && (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -408,13 +651,7 @@ export default function HyperliquidPage() {
                           const markPercent = priceToPercent(markPrice);
                           const liqPercent = priceToPercent(liqPrice);
                           const displayLiqPercent = Math.min(liqPercent, 95);
-                          const redZoneStart = pos5;
-                          const liqPointerPercent = (() => {
-                            const redWidth = displayLiqPercent - redZoneStart;
-                            if (redWidth <= 0) return Math.max(0, displayLiqPercent);
-                            const inset = Math.min(1.5, redWidth / 2);
-                            return Math.max(0, displayLiqPercent - inset);
-                          })();
+                          const liqCursorPercent = Math.max(0, displayLiqPercent - 1);
 
                           const priceAt5Percent = liqPrice * (1 - 0.05);
                           const priceAt10Percent = liqPrice * (1 - 0.10);
@@ -456,7 +693,7 @@ export default function HyperliquidPage() {
                               </div>
 
                               {/* Liquidation Price */}
-                              <div className="absolute h-8 top-4 -translate-x-1/2" style={{ left: `${liqPointerPercent}%` }}>
+                              <div className="absolute h-8 top-4 -translate-x-1/2" style={{ left: `${liqCursorPercent}%` }}>
                                 <div className="relative w-1 h-full bg-black shadow-lg">
                                   <span className="absolute top-10 left-1/2 -translate-x-1/2 text-xs font-bold text-black dark:text-white whitespace-nowrap">
                                     Liq: {formatCurrency(liqPrice)}
