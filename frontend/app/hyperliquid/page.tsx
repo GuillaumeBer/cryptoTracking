@@ -12,8 +12,8 @@ import type { HyperliquidOpportunityFilters, PerpConnectorMode } from './types';
 
 const DEFAULT_OPPORTUNITY_FILTERS: HyperliquidOpportunityFilters = {
   limit: 12,
-  minOpenInterestUsd: 500_000,
-  minVolumeUsd: 250_000,
+  minOpenInterestUsd: 3_000_000,
+  minVolumeUsd: 1_000_000,
   direction: 'short',
   sort: 'score',
   notionalUsd: 10_000,

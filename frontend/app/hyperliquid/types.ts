@@ -122,6 +122,10 @@ export interface HyperliquidOpportunity {
   opportunityScore: number;
   liquidityScore: number;
   volumeScore: number;
+  fundingStrength?: number;
+  stabilityAdjustment?: number;
+  feasibilityWeight?: number;
+  fundingRateStdDevAnnualized?: number;
   expectedDailyReturnPercent: number;
   estimatedDailyPnlUsd: number;
   estimatedMonthlyPnlUsd: number;
@@ -146,6 +150,7 @@ export interface HyperliquidOpportunityFilters {
   direction: OpportunityDirectionFilter;
   sort: OpportunitySort;
   notionalUsd: number;
+  tradingCostDaily?: number;
 }
 
 export interface HyperliquidOpportunityPayload {
