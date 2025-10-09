@@ -63,6 +63,10 @@ export function OpportunitiesSection({
     return opportunities.reduce((max, item) => Math.max(max, item.ranyScore ?? 0), 0);
   }, [opportunities]);
 
+  const bestCombinedScore = useMemo(() => {
+    return opportunities.reduce((max, item) => Math.max(max, item.combinedScore ?? 0), 0);
+  }, [opportunities]);
+
   const handleDirectionChange = (direction: OpportunityDirectionFilter) => {
     setFilters((previous) => (previous.direction === direction ? previous : { ...previous, direction }));
   };
@@ -280,10 +284,16 @@ export function OpportunitiesSection({
         ) : (
           <div className="space-y-4">
             {opportunities.map((market) => {
-              const normalizedScore = bestOpportunityScore > 0 ? Math.min(market.opportunityScore / bestOpportunityScore, 1) : 0;
-              const normalizedRany = bestRanyScore > 0 ? Math.min((market.ranyScore ?? 0) / bestRanyScore, 1) : 0;
-              const scoreBarWidth = `${Math.max(8, normalizedScore * 100)}%`;
-              const ranyBarWidth = `${Math.max(8, normalizedRany * 100)}%`;
+              const normalizedOpportunity = bestOpportunityScore > 0
+                ? Math.min(Math.max(market.opportunityScore, 0) / bestOpportunityScore, 1)
+                : 0;
+              const normalizedRany = bestRanyScore > 0
+                ? Math.min(Math.max(market.ranyScore ?? 0, 0) / bestRanyScore, 1)
+                : 0;
+              const normalizedCombined = bestCombinedScore > 0
+                ? Math.min(Math.max(market.combinedScore ?? 0, 0) / bestCombinedScore, 1)
+                : 0;
+              const combinedBarWidth = `${Math.max(8, normalizedCombined * 100)}%`;
               const directionBadgeClasses =
                 market.direction === 'short'
                   ? 'bg-emerald-500/90 text-white'
@@ -293,7 +303,7 @@ export function OpportunitiesSection({
                 market.fundingRateAnnualized >= 0
                   ? 'text-emerald-600 dark:text-emerald-400'
                   : 'text-rose-600 dark:text-rose-400';
-              const dualHigh = normalizedScore >= 0.75 && normalizedRany >= 0.75;
+              const dualHigh = normalizedOpportunity >= 0.75 && normalizedRany >= 0.75;
 
               return (
                 <div
@@ -395,34 +405,33 @@ export function OpportunitiesSection({
 
                   <div className="mt-4">
                     <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400 mb-1">
-                      <span>Opportunity score</span>
-                      <span>{formatNumber(market.opportunityScore, 2)}</span>
+                      <span>Blended opportunity</span>
+                      <span>{formatNumber((market.combinedScore ?? 0) * 100, 0)} / 100</span>
                     </div>
-                    <div className="h-2 rounded-full bg-slate-200/70 dark:bg-slate-800 overflow-hidden">
+                    <div className="h-2.5 rounded-full bg-slate-200/70 dark:bg-slate-800 overflow-hidden">
                       <div
                         className="h-full rounded-full bg-gradient-to-r from-emerald-400 via-sky-500 to-purple-500"
-                        style={{ width: scoreBarWidth }}
+                        style={{ width: combinedBarWidth }}
                       />
                     </div>
-                  </div>
-
-                  {market.ranyScore !== undefined && (
-                    <div className="mt-3">
-                      <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400 mb-1">
-                        <span>RANY score</span>
-                        <span>{formatNumber(market.ranyScore, 2)}</span>
-                      </div>
-                      <div className="h-2 rounded-full bg-slate-200/70 dark:bg-slate-800 overflow-hidden">
-                        <div
-                          className="h-full rounded-full bg-gradient-to-r from-emerald-500 via-cyan-500 to-indigo-500"
-                          style={{ width: ranyBarWidth }}
-                        />
-                      </div>
-                      <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
-                        Market health {formatPercent(market.marketHealthScore ?? 0, 0)} · Funding σ {formatPercent(market.fundingRateVolatilityAnnualized ?? 0, 2)} · Price ATR {formatPercent(market.priceAtrPercent ?? 0, 2)}
-                      </p>
+                    <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-1 text-[11px] text-slate-500 dark:text-slate-400">
+                      <span>
+                        Opportunity {formatNumber(market.opportunityScore, 2)}
+                      </span>
+                      <span>
+                        RANY {market.ranyScore !== undefined ? formatNumber(market.ranyScore, 2) : '–'}
+                      </span>
+                      <span>
+                        Market health {formatPercent(market.marketHealthScore ?? 0, 0)}
+                      </span>
+                      <span>
+                        Funding σ {formatPercent(market.fundingRateVolatilityAnnualized ?? 0, 2)} · Price ATR {formatPercent(market.priceAtrPercent ?? 0, 2)}
+                      </span>
                     </div>
-                  )}
+                    <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                      Blend weighting: 60% opportunity strength · 40% RANY (risk-adjusted yield)
+                    </p>
+                  </div>
                 </div>
               );
             })}
