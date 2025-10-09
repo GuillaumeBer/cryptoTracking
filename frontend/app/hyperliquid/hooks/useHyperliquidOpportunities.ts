@@ -27,16 +27,38 @@ interface UseHyperliquidOpportunitiesResult {
 }
 
 const REFRESH_INTERVAL_MS = 120_000;
+const DEFAULT_TRADING_COST_DAILY = 0;
 
 function computeScores(
   fundingRateAnnualized: number,
   openInterestUsd: number,
   dayNotionalVolumeUsd: number,
+  options: { stabilityAdjustment?: number; tradingCostDaily?: number } = {},
 ) {
   const liquidityScore = Math.min(1, openInterestUsd / 5_000_000);
   const volumeScore = Math.min(1, dayNotionalVolumeUsd / 2_000_000);
-  const opportunityScore = Math.abs(fundingRateAnnualized) * (0.6 + 0.25 * liquidityScore + 0.15 * volumeScore);
-  return { liquidityScore, volumeScore, opportunityScore };
+  const feasibilityWeight = 0.6 + 0.3 * liquidityScore + 0.1 * volumeScore;
+
+  const tradingCostDaily = options.tradingCostDaily ?? DEFAULT_TRADING_COST_DAILY;
+  const costAnnualized = Math.max(tradingCostDaily, 0) * 365;
+  const fundingStrength = Math.max(Math.abs(fundingRateAnnualized) - costAnnualized, 0);
+
+  const stabilityAdjustment = (() => {
+    if (options.stabilityAdjustment === undefined) return 1;
+    if (!Number.isFinite(options.stabilityAdjustment)) return 1;
+    return Math.min(Math.max(options.stabilityAdjustment, 0.25), 1);
+  })();
+
+  const opportunityScore = fundingStrength * stabilityAdjustment * feasibilityWeight;
+
+  return {
+    liquidityScore,
+    volumeScore,
+    opportunityScore,
+    fundingStrength,
+    stabilityAdjustment,
+    feasibilityWeight,
+  };
 }
 
 export function useHyperliquidOpportunities({
@@ -84,11 +106,13 @@ export function useHyperliquidOpportunities({
           ? Number(market.fundingRateAnnualized)
           : fundingRateHourly * 24 * 365;
         const fundingRateDaily = fundingRateHourly * 24;
-        const { liquidityScore, volumeScore, opportunityScore } = computeScores(
-          fundingRateAnnualized,
-          openInterestUsd,
-          dayNotionalVolumeUsd,
-        );
+        const { liquidityScore, volumeScore, opportunityScore, fundingStrength, feasibilityWeight, stabilityAdjustment } =
+          computeScores(
+            fundingRateAnnualized,
+            openInterestUsd,
+            dayNotionalVolumeUsd,
+            { tradingCostDaily: filters.tradingCostDaily ?? DEFAULT_TRADING_COST_DAILY },
+          );
         const direction = fundingRateHourly >= 0 ? 'short' : 'long';
 
         candidateMarkets.push({
@@ -107,6 +131,9 @@ export function useHyperliquidOpportunities({
           opportunityScore,
           liquidityScore,
           volumeScore,
+          fundingStrength,
+          feasibilityWeight,
+          stabilityAdjustment,
           expectedDailyReturnPercent: fundingRateDaily,
           estimatedDailyPnlUsd: filters.notionalUsd * fundingRateDaily,
           estimatedMonthlyPnlUsd: filters.notionalUsd * fundingRateDaily * 30,

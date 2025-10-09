@@ -17,6 +17,7 @@ export const endpoints = {
     direction?: 'short' | 'long' | 'all';
     sort?: 'score' | 'funding' | 'liquidity' | 'volume';
     notionalUsd?: number;
+    tradingCostDaily?: number;
   } = {}) => {
     const searchParams = new URLSearchParams();
     Object.entries(params).forEach(([key, value]) => {

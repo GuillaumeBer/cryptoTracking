@@ -89,6 +89,10 @@ interface HyperliquidOpportunity {
   opportunityScore: number;
   liquidityScore: number;
   volumeScore: number;
+  fundingStrength?: number;
+  stabilityAdjustment?: number;
+  feasibilityWeight?: number;
+  fundingRateStdDevAnnualized?: number;
   historicalVolatility?: number;
   avgFundingRate24h?: number;
   expectedDailyReturnPercent: number;
@@ -785,9 +789,10 @@ router.get('/opportunities', async (req: Request, res: Response) => {
   const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
   const limit = clamp(Math.round(parseNumericParam(req.query.limit, 15)), 1, 100);
-  const minOpenInterestUsd = Math.max(0, parseNumericParam(req.query.minOpenInterestUsd, 500_000));
-  const minVolumeUsd = Math.max(0, parseNumericParam(req.query.minVolumeUsd, 250_000));
+  const minOpenInterestUsd = Math.max(0, parseNumericParam(req.query.minOpenInterestUsd, 3_000_000));
+  const minVolumeUsd = Math.max(0, parseNumericParam(req.query.minVolumeUsd, 1_000_000));
   const notionalUsd = Math.max(1, parseNumericParam(req.query.notionalUsd, 10_000));
+  const tradingCostDaily = Math.max(0, parseNumericParam(req.query.tradingCostDaily, 0));
 
   const directionParam = parseStringParam(req.query.direction, 'short').toLowerCase();
   const sortParam = parseStringParam(req.query.sort, 'score').toLowerCase();
@@ -811,6 +816,13 @@ router.get('/opportunities', async (req: Request, res: Response) => {
     return data.reduce((a, b) => a + b, 0) / data.length;
   };
 
+  const calculateStandardDeviation = (data: number[]): number | undefined => {
+    if (data.length === 0) return undefined;
+    const mean = calculateAverage(data);
+    const variance = data.reduce((acc, value) => acc + Math.pow(value - mean, 2), 0) / data.length;
+    return Math.sqrt(variance);
+  };
+
   const calculateVolatility = (klines: any[]): number | undefined => {
     if (!klines || klines.length < 2) return undefined;
     const closePrices = klines.map(k => parseFloat(k[4])); // Index 4 is close price
@@ -831,26 +843,43 @@ router.get('/opportunities', async (req: Request, res: Response) => {
     return hourlyVolatility * Math.sqrt(24 * 365);
   };
 
-  const computeScores = (
-    fundingRate: number,
-    openInterestUsd: number,
-    dayNotionalVolumeUsd: number,
-    volatility: number | undefined,
-  ) => {
+  const computeScores = ({
+    fundingRateAnnualized,
+    openInterestUsd,
+    dayNotionalVolumeUsd,
+    stabilityAdjustment,
+    tradingCostDaily,
+  }: {
+    fundingRateAnnualized: number;
+    openInterestUsd: number;
+    dayNotionalVolumeUsd: number;
+    stabilityAdjustment?: number;
+    tradingCostDaily: number;
+  }) => {
     const liquidityScore = Math.min(1, openInterestUsd / 5_000_000);
     const volumeScore = Math.min(1, dayNotionalVolumeUsd / 2_000_000);
 
-    // The funding component is a weighted score of liquidity and volume
-    const fundingComponent = Math.abs(fundingRate) * (0.6 + 0.25 * liquidityScore + 0.15 * volumeScore);
+    const feasibilityWeight = 0.6 + 0.3 * liquidityScore + 0.1 * volumeScore;
 
-    // Adjust for volatility. A higher volatility reduces the score.
-    // Use a default volatility of 1 (100% annualized) if not available to penalize missing data.
-    const effectiveVolatility = volatility === undefined || volatility <= 0 ? 1.0 : volatility;
+    const costAnnualized = Math.max(tradingCostDaily, 0) * 365;
+    const fundingStrength = Math.max(Math.abs(fundingRateAnnualized) - costAnnualized, 0);
 
-    // The new opportunity score is the funding component penalized by volatility.
-    const opportunityScore = fundingComponent / (1 + effectiveVolatility);
+    const boundedStability = (() => {
+      if (stabilityAdjustment === undefined) return 1;
+      if (!Number.isFinite(stabilityAdjustment)) return 1;
+      return Math.min(Math.max(stabilityAdjustment, 0.25), 1);
+    })();
 
-    return { liquidityScore, volumeScore, opportunityScore };
+    const opportunityScore = fundingStrength * boundedStability * feasibilityWeight;
+
+    return {
+      liquidityScore,
+      volumeScore,
+      opportunityScore,
+      fundingStrength,
+      stabilityAdjustment: boundedStability,
+      feasibilityWeight,
+    };
   };
 
   try {
@@ -941,17 +970,47 @@ router.get('/opportunities', async (req: Request, res: Response) => {
           ctx.premium === null || ctx.premium === undefined ? null : parseNumber(ctx.premium);
 
         const historicalVolatility = calculateVolatility(klinesData[asset.name]);
-        const avgFundingRate24h =
-          fundingHistories[asset.name]
-            ? calculateAverage(fundingHistories[asset.name].map(h => parseNumber(h.fundingRate))) * 24 * 365
-            : undefined;
 
-        const { liquidityScore, volumeScore, opportunityScore } = computeScores(
-          avgFundingRate24h ?? fundingRateAnnualized,
+        const fundingHistory = fundingHistories[asset.name];
+        const fundingRatesHourly = fundingHistory
+          ?.map(h => parseNumber(h.fundingRate))
+          .filter(rate => Number.isFinite(rate));
+
+        const averageFundingHourly = fundingRatesHourly && fundingRatesHourly.length > 0
+          ? calculateAverage(fundingRatesHourly)
+          : undefined;
+
+        const stdFundingHourly = fundingRatesHourly && fundingRatesHourly.length > 0
+          ? calculateStandardDeviation(fundingRatesHourly)
+          : undefined;
+
+        const avgFundingRate24h = averageFundingHourly !== undefined ? averageFundingHourly * 24 * 365 : undefined;
+        const fundingRateStdDevAnnualized = stdFundingHourly !== undefined ? stdFundingHourly * 24 * 365 : undefined;
+
+        const stabilityAdjustment = (() => {
+          if (averageFundingHourly === undefined || stdFundingHourly === undefined) {
+            return undefined;
+          }
+          const magnitude = Math.max(Math.abs(averageFundingHourly), 1e-6);
+          const coefficientOfVariation = stdFundingHourly / magnitude;
+          const capped = Math.min(coefficientOfVariation, 5);
+          return 1 / (1 + capped);
+        })();
+
+        const {
+          liquidityScore,
+          volumeScore,
+          opportunityScore,
+          fundingStrength,
+          stabilityAdjustment: normalizedStability,
+          feasibilityWeight,
+        } = computeScores({
+          fundingRateAnnualized: avgFundingRate24h ?? fundingRateAnnualized,
           openInterestUsd,
           dayNotionalVolumeUsd,
-          historicalVolatility,
-        );
+          stabilityAdjustment,
+          tradingCostDaily,
+        });
 
         const direction: 'short' | 'long' = fundingRateHourly >= 0 ? 'short' : 'long';
         const estimatedDailyPnlUsd = notionalUsd * fundingRateDaily;
@@ -973,6 +1032,10 @@ router.get('/opportunities', async (req: Request, res: Response) => {
           opportunityScore,
           liquidityScore,
           volumeScore,
+          fundingStrength,
+          stabilityAdjustment: normalizedStability,
+          feasibilityWeight,
+          fundingRateStdDevAnnualized,
           historicalVolatility,
           avgFundingRate24h,
           expectedDailyReturnPercent: fundingRateDaily,
@@ -1035,6 +1098,7 @@ router.get('/opportunities', async (req: Request, res: Response) => {
           minOpenInterestUsd,
           minVolumeUsd,
           notionalUsd,
+          tradingCostDaily,
           direction: directionFilter,
           sort: sortKey,
         },
