@@ -108,14 +108,25 @@ const DBPS_POWER = new BN(100_000);
 const RATE_POWER = new BN(1_000_000_000);
 const DEBT_POWER = RATE_POWER;
 
+function camelCaseName(name: string): string {
+  if (!name) {
+    return name;
+  }
+  const converted = convertIdlToCamelCase({ name } as unknown as Idl) as { name?: string };
+  return converted.name ?? name;
+}
+
 function normalizeDefinedType(defined: any): any {
   if (typeof defined === 'string') {
-    return { name: defined };
+    return { name: camelCaseName(defined) };
   }
   if (defined && typeof defined === 'object') {
-    const normalized: Record<string, unknown> = { name: defined.name };
-    if (defined.generics) {
-      normalized.generics = defined.generics.map(normalizeType);
+    const normalized: Record<string, unknown> = { ...defined };
+    if (typeof normalized.name === 'string') {
+      normalized.name = camelCaseName(normalized.name);
+    }
+    if (Array.isArray(normalized.generics)) {
+      normalized.generics = normalized.generics.map(normalizeType);
     }
     return normalized;
   }
@@ -225,6 +236,10 @@ function createAccountsCoder(): BorshAccountsCoder {
   camelIdl.types = (camelIdl.types ?? []).map((typeDef: any) => normalizeTypeDef(typeDef));
 
   return new BorshAccountsCoder(camelIdl as Idl);
+}
+
+export function createJupiterAccountsCoder(): BorshAccountsCoder {
+  return createAccountsCoder();
 }
 
 enum BorrowRateMechanism {
@@ -376,7 +391,7 @@ async function fetchLiveMarkets(): Promise<PerpConnectorResult> {
     throw new Error(`Jupiter pool account not found at ${poolAddress}`);
   }
 
-  const pool = coder.decode('Pool', poolInfo.data) as JupiterPoolAccount;
+  const pool = coder.decode('pool', poolInfo.data) as JupiterPoolAccount;
   if (!Array.isArray(pool.custodies) || pool.custodies.length === 0) {
     throw new Error('Jupiter pool does not expose any custody accounts');
   }
@@ -389,7 +404,7 @@ async function fetchLiveMarkets(): Promise<PerpConnectorResult> {
     if (!accountInfo) {
       return;
     }
-    const custody = coder.decode('Custody', accountInfo.data) as JupiterCustodyAccount;
+    const custody = coder.decode('custody', accountInfo.data) as JupiterCustodyAccount;
     custodyRecords.push({ data: custody, pubkey: pool.custodies[index] });
     const oracleAccount = custody.oracle?.oracleAccount;
     if (oracleAccount && custody.oracle.oracleType?.Pyth !== undefined) {
