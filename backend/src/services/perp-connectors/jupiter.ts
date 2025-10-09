@@ -392,10 +392,6 @@ export function createJupiterAccountsCoder(): BorshAccountsCoder {
   return createAccountsCoder();
 }
 
-export function createJupiterRpcFetch(): RpcFetch {
-  return createRpcFetch();
-}
-
 enum BorrowRateMechanism {
   Linear,
   Jump,
