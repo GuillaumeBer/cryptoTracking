@@ -149,6 +149,7 @@ export interface HyperliquidOpportunity {
   marketHealthScore?: number;
   compositeRiskFactor?: number;
   ranyScore?: number;
+  combinedScore?: number;
 }
 
 export interface HyperliquidOpportunityTotals {

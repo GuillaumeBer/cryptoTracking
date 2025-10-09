@@ -28,6 +28,7 @@ interface UseHyperliquidOpportunitiesResult {
 
 const REFRESH_INTERVAL_MS = 120_000;
 const DEFAULT_TRADING_COST_DAILY = 0;
+const BLENDED_SCORE_WEIGHTS = { opportunity: 0.6, rany: 0.4 } as const;
 
 function computeScores(
   fundingRateAnnualized: number,
@@ -178,6 +179,23 @@ export function useHyperliquidOpportunities({
       return true;
     });
 
+    const maxOpportunityScore = filtered.reduce((max, market) => Math.max(max, Math.max(market.opportunityScore, 0)), 0);
+    const maxRanyScore = filtered.reduce((max, market) => Math.max(max, Math.max(market.ranyScore ?? 0, 0)), 0);
+
+    filtered.forEach((market) => {
+      const normalizedOpportunity = maxOpportunityScore > 0
+        ? Math.max(market.opportunityScore, 0) / maxOpportunityScore
+        : 0;
+      const normalizedRany = maxRanyScore > 0 && market.ranyScore !== undefined
+        ? Math.max(market.ranyScore, 0) / maxRanyScore
+        : 0;
+
+      market.combinedScore = (
+        normalizedOpportunity * BLENDED_SCORE_WEIGHTS.opportunity +
+        normalizedRany * BLENDED_SCORE_WEIGHTS.rany
+      );
+    });
+
     const sorter = (a: HyperliquidOpportunity, b: HyperliquidOpportunity) => {
       switch (filters.sort) {
         case 'funding':
@@ -188,7 +206,7 @@ export function useHyperliquidOpportunities({
           return b.dayNotionalVolumeUsd - a.dayNotionalVolumeUsd;
         case 'score':
         default:
-          return b.opportunityScore - a.opportunityScore;
+          return (b.combinedScore ?? b.opportunityScore) - (a.combinedScore ?? a.opportunityScore);
       }
     };
 

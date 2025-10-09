@@ -201,6 +201,7 @@ interface HyperliquidOpportunity {
   marketHealthScore?: number;
   compositeRiskFactor?: number;
   ranyScore?: number;
+  combinedScore?: number;
   expectedDailyReturnPercent: number;
   estimatedDailyPnlUsd: number;
   estimatedMonthlyPnlUsd: number;
@@ -997,6 +998,7 @@ router.get('/opportunities', async (req: Request, res: Response) => {
   const RISK_WEIGHT_FUNDING = 0.6;
   const RISK_WEIGHT_PRICE = 0.4;
   const MIN_MARKET_HEALTH = 0.05;
+  const BLENDED_SCORE_WEIGHTS = { opportunity: 0.6, rany: 0.4 } as const;
 
   try {
     // Fetch historical funding and volatility data in parallel
@@ -1301,6 +1303,23 @@ router.get('/opportunities', async (req: Request, res: Response) => {
       market.ranyScore = ranyScore;
     });
 
+    const maxOpportunityScore = markets.reduce((max, market) => Math.max(max, Math.max(market.opportunityScore, 0)), 0);
+    const maxRanyScore = markets.reduce((max, market) => Math.max(max, Math.max(market.ranyScore ?? 0, 0)), 0);
+
+    markets.forEach((market) => {
+      const normalizedOpportunity = maxOpportunityScore > 0
+        ? Math.max(market.opportunityScore, 0) / maxOpportunityScore
+        : 0;
+      const normalizedRany = maxRanyScore > 0 && market.ranyScore !== undefined
+        ? Math.max(market.ranyScore, 0) / maxRanyScore
+        : 0;
+
+      market.combinedScore = (
+        normalizedOpportunity * BLENDED_SCORE_WEIGHTS.opportunity +
+        normalizedRany * BLENDED_SCORE_WEIGHTS.rany
+      );
+    });
+
     const filteredMarkets = markets.filter((market) => {
       if (directionFilter !== 'all' && market.direction !== directionFilter) {
         return false;
@@ -1323,8 +1342,11 @@ router.get('/opportunities', async (req: Request, res: Response) => {
         case 'volume':
           return b.dayNotionalVolumeUsd - a.dayNotionalVolumeUsd;
         case 'score':
-        default:
-          return b.opportunityScore - a.opportunityScore;
+        default: {
+          const aScore = a.combinedScore ?? a.opportunityScore;
+          const bScore = b.combinedScore ?? b.opportunityScore;
+          return bScore - aScore;
+        }
       }
     });
 
