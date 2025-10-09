@@ -188,6 +188,19 @@ interface HyperliquidOpportunity {
   fundingRateStdDevAnnualized?: number;
   historicalVolatility?: number;
   avgFundingRate24h?: number;
+  expectedFundingRateEwma?: number;
+  expectedGrossYieldAnnualized?: number;
+  expectedTotalCostsAnnualized?: number;
+  expectedNetYieldAnnualized?: number;
+  spreadCostPercent?: number;
+  slippageCostPercent?: number;
+  feeCostPercent?: number;
+  tradesPerYear?: number;
+  fundingRateVolatilityAnnualized?: number;
+  priceAtrPercent?: number;
+  marketHealthScore?: number;
+  compositeRiskFactor?: number;
+  ranyScore?: number;
   expectedDailyReturnPercent: number;
   estimatedDailyPnlUsd: number;
   estimatedMonthlyPnlUsd: number;
@@ -871,6 +884,15 @@ router.get('/opportunities', async (req: Request, res: Response) => {
     return Math.sqrt(variance);
   };
 
+  const calculateEwma = (data: number[], alpha: number): number | undefined => {
+    if (!Array.isArray(data) || data.length === 0) return undefined;
+    let ewma = data[0];
+    for (let i = 1; i < data.length; i++) {
+      ewma = alpha * data[i] + (1 - alpha) * ewma;
+    }
+    return ewma;
+  };
+
   const calculateVolatility = (klines: any[]): number | undefined => {
     if (!klines || klines.length < 2) return undefined;
     const closePrices = klines.map(k => parseFloat(k[4])); // Index 4 is close price
@@ -889,6 +911,43 @@ router.get('/opportunities', async (req: Request, res: Response) => {
     const hourlyVolatility = Math.sqrt(variance);
     // Return annualized volatility from hourly data
     return hourlyVolatility * Math.sqrt(24 * 365);
+  };
+
+  const calculateAtrPercent = (klines: any[], period = 14): number | undefined => {
+    if (!Array.isArray(klines) || klines.length < period + 1) return undefined;
+
+    const highs = klines.map(k => Number.parseFloat(k[2]));
+    const lows = klines.map(k => Number.parseFloat(k[3]));
+    const closes = klines.map(k => Number.parseFloat(k[4]));
+
+    if (highs.some(v => !Number.isFinite(v)) || lows.some(v => !Number.isFinite(v)) || closes.some(v => !Number.isFinite(v))) {
+      return undefined;
+    }
+
+    const trueRanges: number[] = [];
+    for (let i = 1; i < klines.length; i++) {
+      const high = highs[i];
+      const low = lows[i];
+      const previousClose = closes[i - 1];
+      const trueRange = Math.max(
+        high - low,
+        Math.abs(high - previousClose),
+        Math.abs(low - previousClose),
+      );
+      trueRanges.push(trueRange);
+    }
+
+    if (trueRanges.length < period) return undefined;
+
+    const recentTr = trueRanges.slice(-period);
+    const atr = recentTr.reduce((sum, value) => sum + value, 0) / period;
+    const currentClose = closes[closes.length - 1];
+
+    if (!Number.isFinite(currentClose) || currentClose === 0) {
+      return undefined;
+    }
+
+    return atr / currentClose;
   };
 
   const computeScores = ({
@@ -929,6 +988,15 @@ router.get('/opportunities', async (req: Request, res: Response) => {
       feasibilityWeight,
     };
   };
+
+  const EWMA_LOOKBACK_PERIOD = 24;
+  const EWMA_ALPHA = 2 / (EWMA_LOOKBACK_PERIOD + 1);
+  const DEFAULT_AVERAGE_HOLDING_PERIOD_DAYS = 3;
+  const DEFAULT_MARKET_IMPACT_FACTOR = 0.25;
+  const DEFAULT_TAKER_FEE_RATE = 0.0005; // 5 bps per taker fill
+  const RISK_WEIGHT_FUNDING = 0.6;
+  const RISK_WEIGHT_PRICE = 0.4;
+  const MIN_MARKET_HEALTH = 0.05;
 
   try {
     // Fetch historical funding and volatility data in parallel
@@ -1048,9 +1116,13 @@ router.get('/opportunities', async (req: Request, res: Response) => {
           ctx.premium === null || ctx.premium === undefined ? null : parseNumber(ctx.premium);
 
         const historicalVolatility = calculateVolatility(klinesData[asset.name]);
+        const atrPercent = calculateAtrPercent(klinesData[asset.name]);
 
         const fundingHistory = fundingHistories[asset.name];
-        const fundingRatesHourly = fundingHistory
+        const sortedFundingHistory = Array.isArray(fundingHistory)
+          ? [...fundingHistory].sort((a, b) => a.time - b.time)
+          : undefined;
+        const fundingRatesHourly = sortedFundingHistory
           ?.map(h => parseNumber(h.fundingRate))
           .filter(rate => Number.isFinite(rate));
 
@@ -1058,12 +1130,19 @@ router.get('/opportunities', async (req: Request, res: Response) => {
           ? calculateAverage(fundingRatesHourly)
           : undefined;
 
-        const stdFundingHourly = fundingRatesHourly && fundingRatesHourly.length > 0
+        const stdFundingHourly = fundingRatesHourly && fundingRatesHourly.length > 1
           ? calculateStandardDeviation(fundingRatesHourly)
           : undefined;
 
+        const ewmaSource = fundingRatesHourly && fundingRatesHourly.length > 0
+          ? fundingRatesHourly.slice(-Math.max(EWMA_LOOKBACK_PERIOD, 1))
+          : undefined;
+        const expectedFundingRateEwma = ewmaSource ? calculateEwma(ewmaSource, EWMA_ALPHA) : undefined;
+
         const avgFundingRate24h = averageFundingHourly !== undefined ? averageFundingHourly * 24 * 365 : undefined;
-        const fundingRateStdDevAnnualized = stdFundingHourly !== undefined ? stdFundingHourly * 24 * 365 : undefined;
+        const fundingRateStdDevAnnualized = stdFundingHourly !== undefined
+          ? stdFundingHourly * Math.sqrt(24 * 365)
+          : undefined;
 
         const stabilityAdjustment = (() => {
           if (averageFundingHourly === undefined || stdFundingHourly === undefined) {
@@ -1089,6 +1168,50 @@ router.get('/opportunities', async (req: Request, res: Response) => {
           stabilityAdjustment,
           tradingCostDaily,
         });
+
+        const impactValues = Array.isArray(ctx.impactPxs)
+          ? ctx.impactPxs
+              .map(value => parseNumber(value))
+              .filter(value => Number.isFinite(value) && value > 0)
+          : [];
+
+        let bidPx = impactValues.length >= 2 ? Math.min(impactValues[0], impactValues[1]) : undefined;
+        let askPx = impactValues.length >= 2 ? Math.max(impactValues[0], impactValues[1]) : undefined;
+
+        const spreadCostPercent = (() => {
+          const reference = effectivePrice;
+          if (Number.isFinite(bidPx) && Number.isFinite(askPx) && reference > 0) {
+            const spread = Math.max((askPx ?? 0) - (bidPx ?? 0), 0);
+            return reference > 0 ? spread / reference : 0;
+          }
+
+          if (reference > 0) {
+            const fallbackSpread = reference * 0.0005; // 5 bps fall-back spread
+            bidPx = reference - fallbackSpread / 2;
+            askPx = reference + fallbackSpread / 2;
+            return fallbackSpread / reference;
+          }
+
+          return 0.0005;
+        })();
+
+        const estimatedHourlyDepthUsd = dayNotionalVolumeUsd > 0 ? dayNotionalVolumeUsd / 24 : 0;
+        const slippageCostPercent = estimatedHourlyDepthUsd > 0
+          ? Math.min((notionalUsd / estimatedHourlyDepthUsd) * DEFAULT_MARKET_IMPACT_FACTOR, 0.05)
+          : 0.01;
+        const feeCostPercent = DEFAULT_TAKER_FEE_RATE * 2;
+        const tradesPerYear = 365 / DEFAULT_AVERAGE_HOLDING_PERIOD_DAYS;
+
+        const effectiveExpectedFundingRate = expectedFundingRateEwma ?? fundingRateHourly;
+        const expectedFundingRateDirectional = fundingRateHourly >= 0
+          ? Math.max(effectiveExpectedFundingRate, 0)
+          : Math.max(-effectiveExpectedFundingRate, 0);
+        const expectedGrossYieldAnnualized = expectedFundingRateDirectional * 24 * 365;
+        const expectedTotalCostsAnnualized = tradesPerYear * (spreadCostPercent * 2 + slippageCostPercent * 2 + feeCostPercent);
+        const expectedNetYieldAnnualized = expectedGrossYieldAnnualized - expectedTotalCostsAnnualized;
+
+        const fundingRateVolatilityAnnualized = fundingRateStdDevAnnualized;
+        const priceAtrPercent = atrPercent;
 
         const direction: 'short' | 'long' = fundingRateHourly >= 0 ? 'short' : 'long';
         const estimatedDailyPnlUsd = notionalUsd * fundingRateDaily;
@@ -1116,6 +1239,16 @@ router.get('/opportunities', async (req: Request, res: Response) => {
           fundingRateStdDevAnnualized,
           historicalVolatility,
           avgFundingRate24h,
+          expectedFundingRateEwma,
+          expectedGrossYieldAnnualized,
+          expectedTotalCostsAnnualized,
+          expectedNetYieldAnnualized,
+          spreadCostPercent,
+          slippageCostPercent,
+          feeCostPercent,
+          tradesPerYear,
+          fundingRateVolatilityAnnualized,
+          priceAtrPercent,
           expectedDailyReturnPercent: fundingRateDaily,
           estimatedDailyPnlUsd,
           estimatedMonthlyPnlUsd,
@@ -1127,6 +1260,46 @@ router.get('/opportunities', async (req: Request, res: Response) => {
         } as HyperliquidOpportunity;
       })
       .filter((market): market is HyperliquidOpportunity => market !== null);
+
+    const maxOpenInterestUsd = markets.reduce((max, market) => Math.max(max, market.openInterestUsd ?? 0), 0);
+    const maxVolumeUsd = markets.reduce((max, market) => Math.max(max, market.dayNotionalVolumeUsd ?? 0), 0);
+    const maxDepthEstimate = markets.reduce((max, market) => {
+      const depth = market.dayNotionalVolumeUsd > 0 ? market.dayNotionalVolumeUsd / 24 : 0;
+      return Math.max(max, depth);
+    }, 0);
+
+    const depthWeights = { oi: 0.4, volume: 0.3, depth: 0.3 } as const;
+
+    markets.forEach((market) => {
+      const oiScore = maxOpenInterestUsd > 0 ? Math.min(market.openInterestUsd / maxOpenInterestUsd, 1) : 0;
+      const volumeScoreNormalized = maxVolumeUsd > 0 ? Math.min(market.dayNotionalVolumeUsd / maxVolumeUsd, 1) : 0;
+      const depthEstimate = market.dayNotionalVolumeUsd > 0 ? market.dayNotionalVolumeUsd / 24 : 0;
+      const depthNormalized = maxDepthEstimate > 0 ? Math.min(depthEstimate / maxDepthEstimate, 1) : 0;
+      const spreadScore = market.spreadCostPercent !== undefined
+        ? Math.max(0, 1 - (market.spreadCostPercent / 0.005))
+        : 0.5;
+      const depthComposite = Math.min(1, depthNormalized * 0.7 + spreadScore * 0.3);
+      const marketHealthScore = Math.max(0, Math.min(1, (
+        depthWeights.oi * oiScore +
+        depthWeights.volume * volumeScoreNormalized +
+        depthWeights.depth * depthComposite
+      )));
+
+      const fundingVol = market.fundingRateVolatilityAnnualized ?? 0;
+      const priceVol = market.priceAtrPercent ?? 0;
+      const combinedVolatility = Math.sqrt(
+        RISK_WEIGHT_FUNDING * Math.pow(fundingVol, 2) +
+        RISK_WEIGHT_PRICE * Math.pow(priceVol, 2),
+      );
+      const healthForRisk = Math.max(marketHealthScore, MIN_MARKET_HEALTH);
+      const compositeRiskFactor = healthForRisk > 0 ? combinedVolatility / healthForRisk : undefined;
+      const expectedNetYield = market.expectedNetYieldAnnualized ?? 0;
+      const ranyScore = compositeRiskFactor && compositeRiskFactor > 0 ? expectedNetYield / compositeRiskFactor : undefined;
+
+      market.marketHealthScore = marketHealthScore;
+      market.compositeRiskFactor = compositeRiskFactor;
+      market.ranyScore = ranyScore;
+    });
 
     const filteredMarkets = markets.filter((market) => {
       if (directionFilter !== 'all' && market.direction !== directionFilter) {
