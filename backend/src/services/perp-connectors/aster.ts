@@ -167,6 +167,7 @@ const asterConnector: PerpConnector = {
   },
   async fetchMarkets(ctx?: PerpConnectorContext): Promise<PerpConnectorResult> {
     const useMock = ctx?.useMockData ?? false;
+    const preferLive = ctx?.preferLive ?? false;
 
     if (useMock) {
       const mock = getMockMarkets('aster');
@@ -181,6 +182,10 @@ const asterConnector: PerpConnector = {
     try {
       return await fetchLiveMarkets();
     } catch (error) {
+      if (preferLive) {
+        throw error instanceof Error ? error : new Error(String(error));
+      }
+      console.warn('[Perp][Aster] Falling back to mock data:', (error as Error).message);
       const mock = getMockMarkets('aster');
       return {
         meta: this.meta,

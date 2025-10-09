@@ -28,6 +28,11 @@ export async function fetchAllPerpMarkets(ctx?: PerpConnectorContext): Promise<P
       const result = await getConnectorResultWithCache(connector, ctx);
       results.push(result);
     } catch (error) {
+      if (ctx?.preferLive) {
+        throw new Error(
+          `Connector "${connector.meta.id}" failed to fetch live markets: ${(error as Error).message}`,
+        );
+      }
       results.push({
         meta: connector.meta,
         markets: [],

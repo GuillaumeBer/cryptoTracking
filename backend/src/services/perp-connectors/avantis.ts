@@ -207,6 +207,7 @@ const avantisConnector: PerpConnector = {
   },
   async fetchMarkets(ctx?: PerpConnectorContext): Promise<PerpConnectorResult> {
     const useMock = ctx?.useMockData ?? false;
+    const preferLive = ctx?.preferLive ?? false;
     if (useMock) {
       const mock = getMockMarkets('avantis');
       return {
@@ -220,6 +221,9 @@ const avantisConnector: PerpConnector = {
     try {
       return await fetchLiveMarkets();
     } catch (error) {
+      if (preferLive) {
+        throw error instanceof Error ? error : new Error(String(error));
+      }
       console.warn('[Perp][Avantis] Falling back to mock data:', (error as Error).message);
       const mock = getMockMarkets('avantis');
       return {

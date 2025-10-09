@@ -11,7 +11,8 @@ const TTL_MOCK_MS = Number(process.env.PERP_CONNECTOR_MOCK_TTL_MS ?? 10_000);
 const cache = new Map<string, CacheEntry>();
 
 function getCacheKey(connectorId: string, ctx?: PerpConnectorContext): string {
-  const mode = ctx?.useMockData ? 'mock' : 'auto';
+  const mode =
+    ctx?.mode ?? (ctx?.useMockData ? 'mock' : ctx?.preferLive ? 'live' : 'auto');
   return `${connectorId}:${mode}`;
 }
 

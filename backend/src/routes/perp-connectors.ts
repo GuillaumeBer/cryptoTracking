@@ -9,9 +9,11 @@ router.get('/', async (req: Request, res: Response) => {
 
   let ctx: PerpConnectorContext | undefined;
   if (modeParam === 'mock') {
-    ctx = { useMockData: true };
+    ctx = { useMockData: true, preferLive: false, mode: 'mock' };
   } else if (modeParam === 'live') {
-    ctx = { useMockData: false };
+    ctx = { useMockData: false, preferLive: true, mode: 'live' };
+  } else {
+    ctx = { mode: 'auto', preferLive: false };
   }
 
   try {
