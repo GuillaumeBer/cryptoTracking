@@ -372,6 +372,27 @@ export class BinanceService {
   isConfigured(): boolean {
     return !!this.client && !!this.apiKey && (!!this.apiSecret || !!this.privateKeyPath);
   }
+
+  /**
+   * Fetch klines (candlestick data) for a symbol
+   */
+  async getKlines(symbol: string, interval: string, limit: number = 24): Promise<any[]> {
+    if (!this.client) {
+      console.warn('Binance client not initialized, cannot fetch klines');
+      return [];
+    }
+
+    try {
+      const response = await this.client.klines(symbol, interval, { limit });
+      return response.data;
+    } catch (error: any) {
+      // Don't spam logs for symbols that don't exist on Binance (e.g., "TIA")
+      if (error.response?.data?.code !== -1121) { // -1121 is "Invalid symbol"
+        console.error(`Error fetching klines for ${symbol}:`, error.response?.data || error.message);
+      }
+      return [];
+    }
+  }
 }
 
 // Singleton instance - lazy initialization
@@ -400,5 +421,9 @@ export const binanceService = {
 
   isConfigured() {
     return this.getInstance().isConfigured();
+  },
+
+  async getKlines(symbol: string, interval: string, limit: number = 24): Promise<any[]> {
+    return this.getInstance().getKlines(symbol, interval, limit);
   }
 };
