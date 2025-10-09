@@ -89,6 +89,8 @@ interface HyperliquidOpportunity {
   opportunityScore: number;
   liquidityScore: number;
   volumeScore: number;
+  historicalVolatility?: number;
+  avgFundingRate24h?: number;
   expectedDailyReturnPercent: number;
   estimatedDailyPnlUsd: number;
   estimatedMonthlyPnlUsd: number;
@@ -804,14 +806,56 @@ router.get('/opportunities', async (req: Request, res: Response) => {
     return Number.isFinite(parsed) ? parsed : 0;
   };
 
-  const computeScores = (fundingRateAnnualized: number, openInterestUsd: number, dayNotionalVolumeUsd: number) => {
+  const calculateAverage = (data: number[]): number => {
+    if (data.length === 0) return 0;
+    return data.reduce((a, b) => a + b, 0) / data.length;
+  };
+
+  const calculateVolatility = (klines: any[]): number | undefined => {
+    if (!klines || klines.length < 2) return undefined;
+    const closePrices = klines.map(k => parseFloat(k[4])); // Index 4 is close price
+
+    const returns = [];
+    for (let i = 1; i < closePrices.length; i++) {
+      if (closePrices[i - 1] !== 0) {
+        returns.push((closePrices[i] - closePrices[i - 1]) / closePrices[i - 1]);
+      }
+    }
+
+    if (returns.length === 0) return 0;
+
+    const meanReturn = calculateAverage(returns);
+    const variance = returns.reduce((acc, r) => acc + Math.pow(r - meanReturn, 2), 0) / returns.length;
+    const hourlyVolatility = Math.sqrt(variance);
+    // Return annualized volatility from hourly data
+    return hourlyVolatility * Math.sqrt(24 * 365);
+  };
+
+  const computeScores = (
+    fundingRate: number,
+    openInterestUsd: number,
+    dayNotionalVolumeUsd: number,
+    volatility: number | undefined,
+  ) => {
     const liquidityScore = Math.min(1, openInterestUsd / 5_000_000);
     const volumeScore = Math.min(1, dayNotionalVolumeUsd / 2_000_000);
-    const opportunityScore = Math.abs(fundingRateAnnualized) * (0.6 + 0.25 * liquidityScore + 0.15 * volumeScore);
+
+    // The funding component is a weighted score of liquidity and volume
+    const fundingComponent = Math.abs(fundingRate) * (0.6 + 0.25 * liquidityScore + 0.15 * volumeScore);
+
+    // Adjust for volatility. A higher volatility reduces the score.
+    // Use a default volatility of 1 (100% annualized) if not available to penalize missing data.
+    const effectiveVolatility = volatility === undefined || volatility <= 0 ? 1.0 : volatility;
+
+    // The new opportunity score is the funding component penalized by volatility.
+    const opportunityScore = fundingComponent / (1 + effectiveVolatility);
+
     return { liquidityScore, volumeScore, opportunityScore };
   };
 
   try {
+    // Fetch historical funding and volatility data in parallel
+    const twentyFourHoursAgo = Date.now() - (24 * 60 * 60 * 1000);
     const response = await fetch('https://api.hyperliquid.xyz/info', {
       method: 'POST',
       headers: {
@@ -837,6 +881,44 @@ router.get('/opportunities', async (req: Request, res: Response) => {
       throw new Error('Missing asset contexts in Hyperliquid payload');
     }
 
+    const fundingHistories: { [coin: string]: HyperliquidFundingHistoryItem[] } = {};
+    const klinesData: { [coin: string]: any[] } = {};
+
+    const dataFetchPromises = universe.map(async (asset) => {
+      const coin = asset.name;
+      if (asset.isDelisted) return;
+
+      const fundingPromise = fetch('https://api.hyperliquid.xyz/info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'fundingHistory',
+          coin: coin,
+          startTime: twentyFourHoursAgo,
+        }),
+      })
+        .then(res => (res.ok ? res.json() : Promise.resolve([])))
+        .catch(() => []);
+
+      const binanceSymbol = `${coin.toUpperCase()}USDT`;
+      const klinesPromise = binanceService.getKlines(binanceSymbol, '1h', 24);
+
+      const [fundingResult, klinesResult] = await Promise.all([
+        fundingPromise,
+        klinesPromise,
+      ]);
+
+      if (Array.isArray(fundingResult) && fundingResult.length > 0) {
+        fundingHistories[coin] = fundingResult;
+      }
+      if (Array.isArray(klinesResult) && klinesResult.length > 0) {
+        klinesData[coin] = klinesResult;
+      }
+    });
+
+    await Promise.all(dataFetchPromises);
+    console.log(`✅ Fetched historical data: ${Object.keys(fundingHistories).length} funding histories, ${Object.keys(klinesData).length} kline series.`);
+
     const markets: HyperliquidOpportunity[] = universe
       .map((asset, index) => {
         const ctx = assetCtxs[index];
@@ -858,10 +940,17 @@ router.get('/opportunities', async (req: Request, res: Response) => {
         const premium =
           ctx.premium === null || ctx.premium === undefined ? null : parseNumber(ctx.premium);
 
+        const historicalVolatility = calculateVolatility(klinesData[asset.name]);
+        const avgFundingRate24h =
+          fundingHistories[asset.name]
+            ? calculateAverage(fundingHistories[asset.name].map(h => parseNumber(h.fundingRate))) * 24 * 365
+            : undefined;
+
         const { liquidityScore, volumeScore, opportunityScore } = computeScores(
-          fundingRateAnnualized,
+          avgFundingRate24h ?? fundingRateAnnualized,
           openInterestUsd,
           dayNotionalVolumeUsd,
+          historicalVolatility,
         );
 
         const direction: 'short' | 'long' = fundingRateHourly >= 0 ? 'short' : 'long';
@@ -884,6 +973,8 @@ router.get('/opportunities', async (req: Request, res: Response) => {
           opportunityScore,
           liquidityScore,
           volumeScore,
+          historicalVolatility,
+          avgFundingRate24h,
           expectedDailyReturnPercent: fundingRateDaily,
           estimatedDailyPnlUsd,
           estimatedMonthlyPnlUsd,
