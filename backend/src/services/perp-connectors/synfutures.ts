@@ -31,6 +31,7 @@ const synfuturesConnector: PerpConnector = {
   },
   async fetchMarkets(ctx?: PerpConnectorContext): Promise<PerpConnectorResult> {
     const useMock = ctx?.useMockData ?? false;
+    const preferLive = ctx?.preferLive ?? false;
     if (useMock) {
       const mock = getMockMarkets('synfutures_v3');
       return {
@@ -44,6 +45,10 @@ const synfuturesConnector: PerpConnector = {
     try {
       return await fetchLiveMarkets();
     } catch (error) {
+      if (preferLive) {
+        throw error instanceof Error ? error : new Error(String(error));
+      }
+      console.warn('[Perp][SynFutures] Falling back to mock data:', (error as Error).message);
       const mock = getMockMarkets('synfutures_v3');
       return {
         meta: this.meta,

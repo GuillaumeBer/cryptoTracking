@@ -28,8 +28,21 @@ export interface PerpConnectorMetadata {
   requiresApiKey: boolean;
 }
 
+export type PerpConnectorMode = 'auto' | 'mock' | 'live';
+
 export interface PerpConnectorContext {
   useMockData?: boolean;
+  /**
+   * When true the caller explicitly requested a live pull. In this mode
+   * connectors should surface the underlying error instead of silently
+   * falling back to mock data so the UI can surface the failure state.
+   */
+  preferLive?: boolean;
+  /**
+   * Provides the resolved mode so cache keys can differentiate between
+   * automatic, mock, and forced-live requests.
+   */
+  mode?: PerpConnectorMode;
 }
 
 export interface PerpConnectorResult {

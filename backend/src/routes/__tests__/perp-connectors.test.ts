@@ -61,7 +61,11 @@ describe('Perp Connectors Route', () => {
     expect(Array.isArray(response.body.connectors)).toBe(true);
     expect(Array.isArray(response.body.summary)).toBe(true);
     expect(response.body.connectors.length).toBeGreaterThan(0);
-    expect(mockedFetchAllPerpMarkets).toHaveBeenCalledWith({ useMockData: true });
+    expect(mockedFetchAllPerpMarkets).toHaveBeenCalledWith({
+      useMockData: true,
+      preferLive: false,
+      mode: 'mock',
+    });
     expect(mockedListPerpConnectors).toHaveBeenCalled();
   });
 
@@ -85,6 +89,32 @@ describe('Perp Connectors Route', () => {
     expect(response.status).toBe(200);
     expect(response.body.mode).toBe('auto');
     expect(Array.isArray(response.body.summary)).toBe(true);
-    expect(mockedFetchAllPerpMarkets).toHaveBeenCalledWith(undefined);
+    expect(mockedFetchAllPerpMarkets).toHaveBeenCalledWith({ mode: 'auto', preferLive: false });
+  });
+
+  it('should request live mode with preferLive flag enabled', async () => {
+    mockedFetchAllPerpMarkets.mockResolvedValueOnce([
+      {
+        meta: {
+          id: 'avantis',
+          name: 'Avantis',
+          description: 'Test connector',
+          requiresApiKey: false,
+        },
+        markets: [],
+        lastUpdated: '2025-01-01T00:00:00Z',
+        source: 'mock',
+      },
+    ]);
+
+    const response = await request(app).get('/perp-connectors?mode=live');
+
+    expect(response.status).toBe(200);
+    expect(response.body.mode).toBe('live');
+    expect(mockedFetchAllPerpMarkets).toHaveBeenCalledWith({
+      useMockData: false,
+      preferLive: true,
+      mode: 'live',
+    });
   });
 });

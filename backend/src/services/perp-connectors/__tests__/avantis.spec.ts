@@ -183,4 +183,15 @@ describe('avantisConnector.fetchMarkets', () => {
       'Failed to fetch Avantis markets: network down',
     );
   });
+
+  it('rethrows the live error when preferLive is requested', async () => {
+    mockedAxiosGet.mockRejectedValueOnce(new Error('network down'));
+
+    await expect(
+      avantisConnector.fetchMarkets({ useMockData: false, preferLive: true }),
+    ).rejects.toThrow('network down');
+
+    expect(mockedGetMockMarkets).not.toHaveBeenCalled();
+    expect(consoleWarnSpy).not.toHaveBeenCalled();
+  });
 });

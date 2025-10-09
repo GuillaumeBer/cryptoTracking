@@ -1,5 +1,10 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 import { BorshAccountsCoder, BN, type Idl } from '@coral-xyz/anchor';
+import fetch, { type RequestInfo, type RequestInit, type Response } from 'node-fetch';
+import https from 'https';
+import net from 'net';
+import tls from 'tls';
+import { URL } from 'url';
 import {
   PerpConnector,
   PerpConnectorContext,
@@ -11,6 +16,151 @@ import { getMockMarkets } from './mock-loader';
 import { convertIdlToCamelCase } from '@coral-xyz/anchor/dist/cjs/idl.js';
 import { IDL as JupiterPerpsIdl } from './jupiter/full-idl';
 import { parsePythPriceData, PriceStatus } from './jupiter/pyth';
+
+class JupiterHttpsProxyAgent extends https.Agent {
+  private readonly proxyUrl: URL;
+
+  constructor(proxy: string) {
+    super({ keepAlive: true });
+    this.proxyUrl = new URL(proxy);
+  }
+
+  override createConnection(options: any, callback: any): any {
+    const connectOptions = { ...(options ?? {}) } as https.AgentOptions & { hostname?: string };
+    const onConnect = typeof callback === 'function' ? callback : () => {};
+
+    const proxyPort = Number(this.proxyUrl.port || '80');
+    const proxyHost = this.proxyUrl.hostname;
+    const targetHost = String(connectOptions.host ?? connectOptions.hostname ?? '');
+    const targetPort = Number(connectOptions.port ?? 443);
+    const authHeader = this.getAuthorizationHeader();
+
+    const proxySocket = net.connect({ host: proxyHost, port: proxyPort });
+
+    let settled = false;
+    const finish = (err: Error | null, socket?: net.Socket) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      onConnect(err, socket);
+    };
+
+    proxySocket.once('error', error => {
+      proxySocket.destroy();
+      finish(error as Error);
+    });
+
+    let responseBuffer = '';
+    proxySocket.on('data', chunk => {
+      responseBuffer += chunk.toString('utf8');
+      if (!responseBuffer.includes('\r\n\r\n')) {
+        return;
+      }
+
+      proxySocket.removeAllListeners('data');
+      const [headerPart, rest] = responseBuffer.split('\r\n\r\n');
+      const statusLine = headerPart.split('\r\n')[0] ?? '';
+      const statusCode = Number(statusLine.split(' ')[1] ?? 0);
+
+      if (statusCode !== 200) {
+        proxySocket.destroy();
+        finish(new Error(`Proxy CONNECT response ${statusCode}`));
+        return;
+      }
+
+      const tlsSocket = tls.connect({
+        socket: proxySocket,
+        servername: typeof connectOptions.servername === 'string' ? connectOptions.servername : targetHost,
+      });
+
+      tlsSocket.once('error', error => {
+        finish(error as Error);
+      });
+
+      if (rest) {
+        tlsSocket.unshift(Buffer.from(rest, 'utf8'));
+      }
+
+      tlsSocket.once('secureConnect', () => {
+        finish(null, tlsSocket);
+      });
+    });
+
+    proxySocket.once('connect', () => {
+      let connectPayload = `CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\nHost: ${targetHost}:${targetPort}\r\n`;
+      if (authHeader) {
+        connectPayload += `Proxy-Authorization: ${authHeader}\r\n`;
+      }
+      connectPayload += '\r\n';
+      proxySocket.write(connectPayload);
+    });
+
+    return undefined;
+  }
+
+  private getAuthorizationHeader(): string | undefined {
+    if (!this.proxyUrl.username && !this.proxyUrl.password) {
+      return undefined;
+    }
+
+    const user = decodeURIComponent(this.proxyUrl.username ?? '');
+    const pass = decodeURIComponent(this.proxyUrl.password ?? '');
+    const credentials = Buffer.from(`${user}:${pass}`).toString('base64');
+    return `Basic ${credentials}`;
+  }
+}
+
+type RpcFetch = (input: RequestInfo, init?: RequestInit) => Promise<Response>;
+
+type RequestInitWithAgent = RequestInit & { agent?: any };
+
+let cachedProxyFetch: RpcFetch | null = null;
+let cachedProxyUrl: string | null = null;
+
+function getProxyUrl(): string | undefined {
+  const keys = [
+    'JUPITER_SOLANA_RPC_PROXY',
+    'HTTPS_PROXY',
+    'https_proxy',
+    'HTTP_PROXY',
+    'http_proxy',
+  ];
+
+  for (const key of keys) {
+    const value = process.env[key];
+    if (value) {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
+function createRpcFetch(): RpcFetch {
+  const proxyUrl = getProxyUrl();
+
+  if (!proxyUrl) {
+    cachedProxyFetch = null;
+    cachedProxyUrl = null;
+    return (input, init) => fetch(input, init);
+  }
+
+  if (cachedProxyFetch && cachedProxyUrl === proxyUrl) {
+    return cachedProxyFetch;
+  }
+
+  const agent = new JupiterHttpsProxyAgent(proxyUrl);
+  const fetchWithProxy: RpcFetch = (input, init) => {
+    const nextInit: RequestInitWithAgent = { ...(init ?? {}) } as RequestInitWithAgent;
+    nextInit.agent = nextInit.agent ?? agent;
+    return fetch(input, nextInit);
+  };
+
+  cachedProxyFetch = fetchWithProxy;
+  cachedProxyUrl = proxyUrl;
+  return fetchWithProxy;
+}
 
 type JupiterPoolAccount = {
   custodies: PublicKey[];
@@ -108,14 +258,25 @@ const DBPS_POWER = new BN(100_000);
 const RATE_POWER = new BN(1_000_000_000);
 const DEBT_POWER = RATE_POWER;
 
+function camelCaseName(name: string): string {
+  if (!name) {
+    return name;
+  }
+  const converted = convertIdlToCamelCase({ name } as unknown as Idl) as { name?: string };
+  return converted.name ?? name;
+}
+
 function normalizeDefinedType(defined: any): any {
   if (typeof defined === 'string') {
-    return { name: defined };
+    return { name: camelCaseName(defined) };
   }
   if (defined && typeof defined === 'object') {
-    const normalized: Record<string, unknown> = { name: defined.name };
-    if (defined.generics) {
-      normalized.generics = defined.generics.map(normalizeType);
+    const normalized: Record<string, unknown> = { ...defined };
+    if (typeof normalized.name === 'string') {
+      normalized.name = camelCaseName(normalized.name);
+    }
+    if (Array.isArray(normalized.generics)) {
+      normalized.generics = normalized.generics.map(normalizeType);
     }
     return normalized;
   }
@@ -225,6 +386,14 @@ function createAccountsCoder(): BorshAccountsCoder {
   camelIdl.types = (camelIdl.types ?? []).map((typeDef: any) => normalizeTypeDef(typeDef));
 
   return new BorshAccountsCoder(camelIdl as Idl);
+}
+
+export function createJupiterAccountsCoder(): BorshAccountsCoder {
+  return createAccountsCoder();
+}
+
+export function createJupiterRpcFetch(): RpcFetch {
+  return createRpcFetch();
 }
 
 enum BorrowRateMechanism {
@@ -366,7 +535,10 @@ function getBaseSymbol(mint: PublicKey): string {
 async function fetchLiveMarkets(): Promise<PerpConnectorResult> {
   const rpcUrl = DEFAULT_RPC_URL;
   const poolAddress = DEFAULT_POOL_ADDRESS;
-  const connection = new Connection(rpcUrl, 'confirmed');
+  const connection = new Connection(rpcUrl, {
+    commitment: 'confirmed',
+    fetch: createRpcFetch() as any,
+  });
   const poolKey = new PublicKey(poolAddress);
 
   const coder = createAccountsCoder();
@@ -376,7 +548,7 @@ async function fetchLiveMarkets(): Promise<PerpConnectorResult> {
     throw new Error(`Jupiter pool account not found at ${poolAddress}`);
   }
 
-  const pool = coder.decode('Pool', poolInfo.data) as JupiterPoolAccount;
+  const pool = coder.decode('pool', poolInfo.data) as JupiterPoolAccount;
   if (!Array.isArray(pool.custodies) || pool.custodies.length === 0) {
     throw new Error('Jupiter pool does not expose any custody accounts');
   }
@@ -389,7 +561,7 @@ async function fetchLiveMarkets(): Promise<PerpConnectorResult> {
     if (!accountInfo) {
       return;
     }
-    const custody = coder.decode('Custody', accountInfo.data) as JupiterCustodyAccount;
+    const custody = coder.decode('custody', accountInfo.data) as JupiterCustodyAccount;
     custodyRecords.push({ data: custody, pubkey: pool.custodies[index] });
     const oracleAccount = custody.oracle?.oracleAccount;
     if (oracleAccount && custody.oracle.oracleType?.Pyth !== undefined) {
@@ -506,6 +678,7 @@ const jupiterConnector: PerpConnector = {
   },
   async fetchMarkets(ctx?: PerpConnectorContext): Promise<PerpConnectorResult> {
     const useMock = ctx?.useMockData ?? false;
+    const preferLive = ctx?.preferLive ?? false;
     if (useMock) {
       const mock = getMockMarkets('jupiter_perps');
       return {
@@ -519,6 +692,9 @@ const jupiterConnector: PerpConnector = {
     try {
       return await fetchLiveMarkets();
     } catch (error) {
+      if (preferLive) {
+        throw error instanceof Error ? error : new Error(String(error));
+      }
       console.warn('[Perp][Jupiter] Falling back to mock data:', (error as Error).message);
       const mock = getMockMarkets('jupiter_perps');
       return {
