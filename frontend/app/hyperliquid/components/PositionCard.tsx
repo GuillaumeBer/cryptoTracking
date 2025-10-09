@@ -3,6 +3,7 @@
 import type { HyperliquidPosition } from '../types';
 import { formatCurrency, formatNumber, formatPercent, formatSignedCurrency } from '../utils/formatters';
 import { FundingRateTrend } from './position/FundingRateTrend';
+import { PriceRiskBar } from './position/PriceRiskBar';
 
 interface PositionCardProps {
   position: HyperliquidPosition;
@@ -175,6 +176,13 @@ export function PositionCard({ position, isClient }: PositionCardProps) {
             <p className="text-xs text-slate-500 dark:text-slate-400">Liq. price {formatCurrency(position.liquidationPrice)}</p>
           </div>
         </div>
+
+        <PriceRiskBar
+          entryPrice={position.entryPrice}
+          markPrice={position.markPrice}
+          liquidationPrice={position.liquidationPrice}
+          distancePercent={position.distanceToLiquidation}
+        />
 
         <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className={`p-4 rounded-lg border ${riskLevel.borderColor} ${riskLevel.bgColor}`}>
