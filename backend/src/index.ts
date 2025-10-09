@@ -11,6 +11,7 @@ import pricesRouter from './routes/prices';
 import portfolioRouter from './routes/portfolio';
 import perpConnectorsRouter from './routes/perp-connectors';
 import { validatePriceApiConfig } from './config/price-api.config';
+import { errorHandler } from './middleware/error-handler';
 
 dotenv.config();
 
@@ -44,6 +45,9 @@ app.use('/api/perp-connectors', perpConnectorsRouter);
 app.get('/health', (req: Request, res: Response) => {
   res.json({ status: 'ok', message: 'Backend is running' });
 });
+
+// Centralized error handling
+app.use(errorHandler);
 
 app.listen(PORT, () => {
   console.log(`Backend server running on http://localhost:${PORT}`);

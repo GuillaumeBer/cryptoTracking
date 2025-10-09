@@ -68,6 +68,9 @@ export interface PortfolioSummary {
 
 class PortfolioAggregator {
   private priceApiUrl = 'http://localhost:3001/api/prices';
+  private readonly priceCache = new Map<string, { value: number; expires: number }>();
+  private readonly contractPriceCache = new Map<string, { value: number; expires: number }>();
+  private readonly cacheTtlMs = 5 * 60 * 1000; // 5 minutes
 
   /**
    * Get complete portfolio across all chains
@@ -77,47 +80,40 @@ class PortfolioAggregator {
 
     // EVM chains via Moralis
     const evmChains = ['arbitrum', 'bsc', 'base', 'polygon', 'avalanche', 'eth', 'optimism'];
-    for (const chain of evmChains) {
-      const tokens = await this.getEvmChainTokens(chain, WALLET_ADDRESS);
-      if (tokens.length > 0) {
+    const evmResults = await Promise.allSettled(
+      evmChains.map(async (chain) => ({ chain, tokens: await this.getEvmChainTokens(chain, WALLET_ADDRESS) }))
+    );
+
+    for (const result of evmResults) {
+      if (result.status === 'fulfilled' && result.value.tokens.length > 0) {
         chains.push({
-          chain,
-          totalValue: tokens.reduce((sum, t) => sum + t.valueUsd, 0),
-          tokens,
+          chain: result.value.chain,
+          totalValue: result.value.tokens.reduce((sum, t) => sum + t.valueUsd, 0),
+          tokens: result.value.tokens,
         });
+      } else if (result.status === 'rejected') {
+        console.error('EVM chain aggregation failed:', result.reason);
       }
     }
 
-    // Solana
-    const solanaTokens = await this.getSolanaTokens(SOLANA_ADDRESS);
-    if (solanaTokens.length > 0) {
-      chains.push({
-        chain: 'solana',
-        totalValue: solanaTokens.reduce((sum, t) => sum + t.valueUsd, 0),
-        tokens: solanaTokens,
-      });
+    const [solanaResult, cosmosResults, suiResult] = await Promise.all([
+      this.safeChainAggregation('solana', () => this.getSolanaTokens(SOLANA_ADDRESS)),
+      this.aggregateCosmosChains(),
+      this.safeChainAggregation('sui', () => this.getSuiTokens(SUI_ADDRESS)),
+    ]);
+
+    if (solanaResult) {
+      chains.push(solanaResult);
     }
 
-    // Cosmos chains
-    for (const [chain, address] of Object.entries(COSMOS_ADDRESSES)) {
-      const tokens = await this.getCosmosChainTokens(chain, address);
-      if (tokens.length > 0) {
-        chains.push({
-          chain,
-          totalValue: tokens.reduce((sum, t) => sum + t.valueUsd, 0),
-          tokens,
-        });
+    for (const chainResult of cosmosResults) {
+      if (chainResult) {
+        chains.push(chainResult);
       }
     }
 
-    // Sui
-    const suiTokens = await this.getSuiTokens(SUI_ADDRESS);
-    if (suiTokens.length > 0) {
-      chains.push({
-        chain: 'sui',
-        totalValue: suiTokens.reduce((sum, t) => sum + t.valueUsd, 0),
-        tokens: suiTokens,
-      });
+    if (suiResult) {
+      chains.push(suiResult);
     }
 
     const totalValue = chains.reduce((sum, c) => sum + c.totalValue, 0);
@@ -178,20 +174,21 @@ class PortfolioAggregator {
    */
   private async getEvmChainTokens(chain: string, address: string): Promise<TokenBalance[]> {
     try {
-      const response = await axios.get(
-        `https://deep-index.moralis.io/api/v2.2/wallets/${address}/tokens`,
-        {
-          params: {
-            chain,
-            exclude_spam: 'true',
-            exclude_unverified_contracts: 'true',
-          },
-          headers: {
-            'X-API-Key': MORALIS_API_KEY,
-            accept: 'application/json',
-          },
-          timeout: 30000,
-        }
+      const response = await this.requestWithRetry(
+        () =>
+          axios.get(`https://deep-index.moralis.io/api/v2.2/wallets/${address}/tokens`, {
+            params: {
+              chain,
+              exclude_spam: 'true',
+              exclude_unverified_contracts: 'true',
+            },
+            headers: {
+              'X-API-Key': MORALIS_API_KEY,
+              accept: 'application/json',
+            },
+            timeout: 30000,
+          }),
+        `moralis-${chain}`
       );
 
       const tokens: TokenBalance[] = [];
@@ -230,12 +227,20 @@ class PortfolioAggregator {
 
     try {
       // Get native SOL
-      const solResponse = await axios.post(SOLANA_RPC, {
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'getBalance',
-        params: [address, { commitment: 'confirmed' }],
-      });
+      const solResponse = await this.requestWithRetry(
+        () =>
+          axios.post(
+            SOLANA_RPC,
+            {
+              jsonrpc: '2.0',
+              id: 1,
+              method: 'getBalance',
+              params: [address, { commitment: 'confirmed' }],
+            },
+            { timeout: 15000 }
+          ),
+        'solana-balance'
+      );
 
       if (solResponse.data?.result?.value) {
         const solBalance = solResponse.data.result.value / 1e9;
@@ -256,14 +261,16 @@ class PortfolioAggregator {
       }
 
       // Get SPL tokens from Moralis
-      const response = await axios.get(
-        `https://solana-gateway.moralis.io/account/mainnet/${address}/tokens`,
-        {
-          headers: {
-            'X-API-Key': MORALIS_API_KEY,
-            accept: 'application/json',
-          },
-        }
+      const response = await this.requestWithRetry(
+        () =>
+          axios.get(`https://solana-gateway.moralis.io/account/mainnet/${address}/tokens`, {
+            headers: {
+              'X-API-Key': MORALIS_API_KEY,
+              accept: 'application/json',
+            },
+            timeout: 20000,
+          }),
+        'solana-spl-tokens'
       );
 
       const splTokens = response.data || [];
@@ -311,7 +318,10 @@ class PortfolioAggregator {
 
     try {
       // Get balances
-      const balancesResponse = await axios.get(`${restApi}/cosmos/bank/v1beta1/balances/${address}`);
+      const balancesResponse = await this.requestWithRetry(
+        () => axios.get(`${restApi}/cosmos/bank/v1beta1/balances/${address}`, { timeout: 20000 }),
+        `${chain}-balances`
+      );
       const balances = balancesResponse.data.balances || [];
 
       for (const balance of balances) {
@@ -336,7 +346,10 @@ class PortfolioAggregator {
       }
 
       // Get staking delegations
-      const delegationsResponse = await axios.get(`${restApi}/cosmos/staking/v1beta1/delegations/${address}`);
+      const delegationsResponse = await this.requestWithRetry(
+        () => axios.get(`${restApi}/cosmos/staking/v1beta1/delegations/${address}`, { timeout: 20000 }),
+        `${chain}-delegations`
+      );
       const delegations = delegationsResponse.data.delegation_responses || [];
 
       let totalStaked = 0;
@@ -378,12 +391,20 @@ class PortfolioAggregator {
     const tokens: TokenBalance[] = [];
 
     try {
-      const response = await axios.post(SUI_RPC, {
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'suix_getAllBalances',
-        params: [address],
-      });
+      const response = await this.requestWithRetry(
+        () =>
+          axios.post(
+            SUI_RPC,
+            {
+              jsonrpc: '2.0',
+              id: 1,
+              method: 'suix_getAllBalances',
+              params: [address],
+            },
+            { timeout: 20000 }
+          ),
+        'sui-balances'
+      );
 
       const balances = response.data.result || [];
       const nonZeroBalances = balances.filter((b: any) => parseInt(b.totalBalance) > 0);
@@ -393,12 +414,20 @@ class PortfolioAggregator {
         const totalBalanceRaw = parseInt(balanceInfo.totalBalance);
 
         // Get metadata
-        const metadataResponse = await axios.post(SUI_RPC, {
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'suix_getCoinMetadata',
-          params: [coinType],
-        });
+        const metadataResponse = await this.requestWithRetry(
+          () =>
+            axios.post(
+              SUI_RPC,
+              {
+                jsonrpc: '2.0',
+                id: 1,
+                method: 'suix_getCoinMetadata',
+                params: [coinType],
+              },
+              { timeout: 20000 }
+            ),
+          'sui-metadata'
+        );
 
         const metadata = metadataResponse.data.result;
         if (!metadata) continue;
@@ -437,7 +466,7 @@ class PortfolioAggregator {
         }
 
         // Small delay to avoid rate limiting
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        await this.sleep(100);
       }
     } catch (error) {
       console.error('Error fetching Sui tokens:', error);
@@ -451,8 +480,19 @@ class PortfolioAggregator {
    */
   private async getTokenPrice(symbol: string): Promise<number> {
     try {
-      const response = await axios.get(`${this.priceApiUrl}/token/${symbol}`, { timeout: 10000 });
-      return response.data.price || 0;
+      const normalizedSymbol = symbol.toUpperCase();
+      const cached = this.priceCache.get(normalizedSymbol);
+      if (cached && cached.expires > Date.now()) {
+        return cached.value;
+      }
+
+      const response = await this.requestWithRetry(
+        () => axios.get(`${this.priceApiUrl}/token/${normalizedSymbol}`, { timeout: 10000 }),
+        `price-${normalizedSymbol}`
+      );
+      const price = response.data.price || 0;
+      this.priceCache.set(normalizedSymbol, { value: price, expires: Date.now() + this.cacheTtlMs });
+      return price;
     } catch (error) {
       return 0;
     }
@@ -463,15 +503,48 @@ class PortfolioAggregator {
    */
   private async getContractPrices(platform: string, addresses: string[]): Promise<{ [address: string]: number }> {
     try {
-      const response = await axios.post(
-        `${this.priceApiUrl}/contracts/${platform}`,
-        { addresses },
-        { timeout: 120000 }
+      const normalizedAddresses = addresses.map((address) => address.toLowerCase());
+      const prices: { [address: string]: number } = {};
+      const missingAddresses: string[] = [];
+
+      for (const address of normalizedAddresses) {
+        const cached = this.contractPriceCache.get(address);
+        if (cached && cached.expires > Date.now()) {
+          prices[address] = cached.value;
+        } else {
+          missingAddresses.push(address);
+        }
+      }
+
+      if (missingAddresses.length === 0) {
+        return prices;
+      }
+
+      const response = await this.requestWithRetry(
+        () =>
+          axios.post(
+            `${this.priceApiUrl}/contracts/${platform}`,
+            { addresses: missingAddresses },
+            { timeout: 120000 }
+          ),
+        `contract-prices-${platform}`
       );
 
-      const prices: { [address: string]: number } = {};
-      for (const [address, data] of Object.entries(response.data)) {
-        prices[address.toLowerCase()] = (data as any).price || 0;
+      for (const [address, data] of Object.entries(response.data || {})) {
+        const normalizedAddress = address.toLowerCase();
+        const price = (data as any).price || 0;
+        prices[normalizedAddress] = price;
+        this.contractPriceCache.set(normalizedAddress, {
+          value: price,
+          expires: Date.now() + this.cacheTtlMs,
+        });
+      }
+
+      // Ensure we always return entries for requested addresses
+      for (const address of normalizedAddresses) {
+        if (!(address in prices)) {
+          prices[address] = 0;
+        }
       }
 
       return prices;
@@ -479,6 +552,74 @@ class PortfolioAggregator {
       console.error(`Error fetching contract prices for ${platform}:`, error);
       return {};
     }
+  }
+
+  private async safeChainAggregation(
+    chain: string,
+    loader: () => Promise<TokenBalance[]>
+  ): Promise<ChainBalance | null> {
+    try {
+      const tokens = await loader();
+      if (tokens.length === 0) {
+        return null;
+      }
+
+      return {
+        chain,
+        totalValue: tokens.reduce((sum, t) => sum + t.valueUsd, 0),
+        tokens,
+      };
+    } catch (error) {
+      console.error(`Chain aggregation failed for ${chain}:`, error);
+      return null;
+    }
+  }
+
+  private async aggregateCosmosChains(): Promise<Array<ChainBalance | null>> {
+    const cosmosEntries = Object.entries(COSMOS_ADDRESSES);
+    const results = await Promise.all(
+      cosmosEntries.map(([chain, address]) => this.safeChainAggregation(chain, () => this.getCosmosChainTokens(chain, address)))
+    );
+
+    return results;
+  }
+
+  private async requestWithRetry<T>(request: () => Promise<T>, context: string, retries = 2): Promise<T> {
+    let attempt = 0;
+    let delayMs = 500;
+
+    while (true) {
+      try {
+        return await request();
+      } catch (error) {
+        attempt += 1;
+        if (attempt > retries || !this.isRetryableError(error)) {
+          throw error;
+        }
+
+        console.warn(`Request failed for ${context}, retrying attempt ${attempt}/${retries}...`);
+        await this.sleep(delayMs);
+        delayMs *= 2;
+      }
+    }
+  }
+
+  private isRetryableError(error: unknown): boolean {
+    if (axios.isAxiosError(error)) {
+      const status = error.response?.status;
+      if (!status) {
+        // Network/timeout errors
+        return true;
+      }
+
+      return status >= 500 || status === 429;
+    }
+
+    return false;
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }
 
