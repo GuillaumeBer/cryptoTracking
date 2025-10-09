@@ -16,6 +16,99 @@ import {
 
 const router = express.Router();
 
+const HYPERLIQUID_API_URL = 'https://api.hyperliquid.xyz/info';
+const HYPERLIQUID_RATE_LIMIT_WINDOW_MS = 1_000;
+const HYPERLIQUID_RATE_LIMIT_MAX_REQUESTS = 8;
+
+const hyperliquidRequestTimestamps: number[] = [];
+const hyperliquidCache = new Map<string, { timestamp: number; data: unknown }>();
+const hyperliquidInFlightRequests = new Map<string, Promise<unknown>>();
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function ensureWithinRateLimit(): Promise<void> {
+  while (true) {
+    const now = Date.now();
+
+    while (hyperliquidRequestTimestamps.length > 0) {
+      const diff = now - hyperliquidRequestTimestamps[0];
+      if (diff > HYPERLIQUID_RATE_LIMIT_WINDOW_MS) {
+        hyperliquidRequestTimestamps.shift();
+      } else {
+        break;
+      }
+    }
+
+    if (hyperliquidRequestTimestamps.length < HYPERLIQUID_RATE_LIMIT_MAX_REQUESTS) {
+      hyperliquidRequestTimestamps.push(now);
+      return;
+    }
+
+    const oldest = hyperliquidRequestTimestamps[0];
+    const waitTime = HYPERLIQUID_RATE_LIMIT_WINDOW_MS - (now - oldest);
+    await sleep(Math.max(waitTime, 25));
+  }
+}
+
+interface FetchHyperliquidOptions {
+  ttlMs?: number;
+  cacheKey?: string;
+}
+
+async function fetchHyperliquidInfo<T>(
+  body: Record<string, unknown>,
+  { ttlMs = 0, cacheKey }: FetchHyperliquidOptions = {},
+): Promise<T> {
+  const key = cacheKey ?? JSON.stringify(body);
+  const now = Date.now();
+
+  if (ttlMs > 0) {
+    const cached = hyperliquidCache.get(key);
+    if (cached && now - cached.timestamp < ttlMs) {
+      return cached.data as T;
+    }
+  }
+
+  if (hyperliquidInFlightRequests.has(key)) {
+    return hyperliquidInFlightRequests.get(key) as Promise<T>;
+  }
+
+  const requestPromise = (async () => {
+    await ensureWithinRateLimit();
+    const response = await fetch(HYPERLIQUID_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Hyperliquid API error: ${response.status} ${response.statusText}`);
+    }
+
+    const data = (await response.json()) as T;
+
+    if (ttlMs > 0) {
+      hyperliquidCache.set(key, { timestamp: Date.now(), data });
+    }
+
+    return data;
+  })()
+    .catch((error) => {
+      if (ttlMs > 0) {
+        hyperliquidCache.delete(key);
+      }
+      throw error;
+    })
+    .finally(() => {
+      hyperliquidInFlightRequests.delete(key);
+    });
+
+  hyperliquidInFlightRequests.set(key, requestPromise);
+  return requestPromise as Promise<T>;
+}
+
 interface DeltaNeutralAction {
   action: 'buy' | 'sell' | 'increase_short' | 'decrease_short';
   amount: number;
@@ -119,24 +212,19 @@ router.get('/', async (req: Request, res: Response) => {
 
     console.log(`Fetching Hyperliquid positions for address: ${address}`);
 
-    // Fetch data from Hyperliquid API
-    const response = await fetch('https://api.hyperliquid.xyz/info', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        type: 'clearinghouseState',
-        user: address,
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Hyperliquid API error: ${response.statusText}`);
-    }
-
-    const data = await response.json() as HyperliquidClearinghouseState;
+    // Fetch data from Hyperliquid API with caching and rate limiting
+    const data = await fetchHyperliquidInfo<HyperliquidClearinghouseState>({
+      type: 'clearinghouseState',
+      user: address,
+    }, { ttlMs: 2_000 });
     console.log('Hyperliquid API response:', JSON.stringify(data, null, 2));
+
+    let priceData: HyperliquidPriceData | null = null;
+    try {
+      priceData = await fetchHyperliquidInfo<HyperliquidPriceData>({ type: 'allMids' }, { ttlMs: 3_000 });
+    } catch (err) {
+      console.error('Error fetching Hyperliquid mark prices:', err);
+    }
 
     // Parse positions
     const positions: HyperliquidPosition[] = [];
@@ -158,28 +246,15 @@ router.get('/', async (req: Request, res: Response) => {
         const liquidationPx = parseFloat(positionData.liquidationPx || '0');
 
         // Fetch current mark price
-        let markPrice = entryPrice;
-        try {
-          const priceResponse = await fetch('https://api.hyperliquid.xyz/info', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              type: 'allMids',
-            }),
-          });
-
-          if (priceResponse.ok) {
-            const priceData = await priceResponse.json() as HyperliquidPriceData;
-            // priceData is an object where keys are coin names and values are prices
-            if (priceData[coin]) {
-              markPrice = parseFloat(priceData[coin]);
+        const markPrice = (() => {
+          if (priceData && priceData[coin]) {
+            const parsed = parseFloat(priceData[coin]);
+            if (!Number.isNaN(parsed)) {
+              return parsed;
             }
           }
-        } catch (err) {
-          console.error(`Error fetching mark price for ${coin}:`, err);
-        }
+          return entryPrice;
+        })();
 
         // Calculate metrics
         const unrealizedPnlPercent = positionValue !== 0 ? (unrealizedPnl / Math.abs(positionValue)) * 100 : 0;
@@ -248,62 +323,52 @@ router.get('/', async (req: Request, res: Response) => {
       };
 
       try {
-        const historyResponse = await fetch('https://api.hyperliquid.xyz/info', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            type: 'fundingHistory',
-            coin: coin,
-            startTime: sevenDaysAgo,
-          }),
+        const historyData = await fetchHyperliquidInfo<HyperliquidFundingHistoryItem[]>({
+          type: 'fundingHistory',
+          coin: coin,
+          startTime: sevenDaysAgo,
+        }, {
+          ttlMs: 10 * 60 * 1000,
         });
 
-        if (historyResponse.ok) {
-          const historyData = await historyResponse.json() as HyperliquidFundingHistoryItem[];
+        if (Array.isArray(historyData) && historyData.length > 0) {
+          // Get current rate from most recent funding history entry
+          const sortedHistory = [...historyData].sort((a, b) => b.time - a.time);
+          const currentRate = parseFloat(sortedHistory[0].fundingRate);
+          const currentRateApr = currentRate * 24 * 365 * 100;
 
-          if (Array.isArray(historyData) && historyData.length > 0) {
-            // Get current rate from most recent funding history entry
-            const sortedHistory = [...historyData].sort((a, b) => b.time - a.time);
-            const currentRate = parseFloat(sortedHistory[0].fundingRate);
-            const currentRateApr = currentRate * 24 * 365 * 100;
+          // Calculate 7-day average
+          const rates = historyData.map(h => parseFloat(h.fundingRate));
+          const avgRate7d = rates.reduce((sum, r) => sum + r, 0) / rates.length;
+          const avgRate7dApr = avgRate7d * 24 * 365 * 100;
 
-            // Calculate 7-day average
-            const rates = historyData.map(h => parseFloat(h.fundingRate));
-            const avgRate7d = rates.reduce((sum, r) => sum + r, 0) / rates.length;
-            const avgRate7dApr = avgRate7d * 24 * 365 * 100;
+          // Create history array with timestamps and rates
+          const history = historyData.map(h => ({
+            time: h.time,
+            rate: parseFloat(h.fundingRate),
+            rateApr: parseFloat(h.fundingRate) * 24 * 365 * 100,
+          })).sort((a, b) => a.time - b.time);
 
-            // Create history array with timestamps and rates
-            const history = historyData.map(h => ({
-              time: h.time,
-              rate: parseFloat(h.fundingRate),
-              rateApr: parseFloat(h.fundingRate) * 24 * 365 * 100,
-            })).sort((a, b) => a.time - b.time);
+          // Calculate next funding time (every hour on the hour)
+          const now = new Date();
+          const nextFundingTime = new Date(now);
+          nextFundingTime.setUTCHours(now.getUTCHours() + 1, 0, 0, 0);
 
-            // Calculate next funding time (every hour on the hour)
-            const now = new Date();
-            const nextFundingTime = new Date(now);
-            nextFundingTime.setUTCHours(now.getUTCHours() + 1, 0, 0, 0);
+          // Estimate daily/monthly revenue
+          const positionValue = position.positionValueUsd;
+          const estimatedDailyRevenue = positionValue * currentRate * 24;
+          const estimatedMonthlyRevenue = estimatedDailyRevenue * 30;
 
-            // Estimate daily/monthly revenue
-            const positionValue = position.positionValueUsd;
-            const estimatedDailyRevenue = positionValue * currentRate * 24;
-            const estimatedMonthlyRevenue = estimatedDailyRevenue * 30;
-
-            fundingRateHistory[coin] = {
-              currentRate,
-              currentRateApr,
-              nextFundingTime: nextFundingTime.getTime(),
-              avgRate7d,
-              avgRate7dApr,
-              history: history.slice(-168),
-              estimatedDailyRevenue,
-              estimatedMonthlyRevenue,
-            };
-          } else {
-            fundingRateHistory[coin] = defaultFundingData;
-          }
+          fundingRateHistory[coin] = {
+            currentRate,
+            currentRateApr,
+            nextFundingTime: nextFundingTime.getTime(),
+            avgRate7d,
+            avgRate7dApr,
+            history: history.slice(-168),
+            estimatedDailyRevenue,
+            estimatedMonthlyRevenue,
+          };
         } else {
           fundingRateHistory[coin] = defaultFundingData;
         }
@@ -314,17 +379,6 @@ router.get('/', async (req: Request, res: Response) => {
     }
 
     // Fetch trade history (userFills) to calculate fees
-    const fillsResponse = await fetch('https://api.hyperliquid.xyz/info', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        type: 'userFills',
-        user: address,
-      }),
-    });
-
     const hyperliquidFeesByCoin: { [coin: string]: number } = {};
     const binanceFeesByCoin: { [coin: string]: number } = {};
     const tradeCountByCoin: { [coin: string]: number } = {};
@@ -335,8 +389,11 @@ router.get('/', async (req: Request, res: Response) => {
       [coin: string]: Array<{ time: number; hyperliquidFee: number; binanceFee: number }>;
     } = {};
 
-    if (fillsResponse.ok) {
-      const fills = (await fillsResponse.json()) as HyperliquidUserFill[];
+    try {
+      const fills = await fetchHyperliquidInfo<HyperliquidUserFill[]>({
+        type: 'userFills',
+        user: address,
+      }, { ttlMs: 5 * 60 * 1000 });
 
       if (Array.isArray(fills)) {
         const sortedFills = [...fills].sort((a, b) => a.time - b.time);
@@ -419,27 +476,21 @@ router.get('/', async (req: Request, res: Response) => {
           }
         });
       }
+    } catch (error) {
+      console.error('Error fetching Hyperliquid user fills:', error);
     }
 
     // Fetch funding history
-    const fundingResponse = await fetch('https://api.hyperliquid.xyz/info', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        type: 'userFunding',
-        user: address,
-        startTime: 0, // Fetch all time
-      }),
-    });
-
     const fundingByCoinAllTime: { [coin: string]: number } = {};
     const fundingByCoinSinceChange: { [coin: string]: number } = {};
     const currentSessionFundingByCoin: { [coin: string]: number } = {};
 
-    if (fundingResponse.ok) {
-      const fundingData = (await fundingResponse.json()) as HyperliquidFundingItem[];
+    try {
+      const fundingData = await fetchHyperliquidInfo<HyperliquidFundingItem[]>({
+        type: 'userFunding',
+        user: address,
+        startTime: 0, // Fetch all time
+      }, { ttlMs: 10 * 60 * 1000 });
 
       if (Array.isArray(fundingData)) {
         // Hyperliquid funding occurs every 8 hours
@@ -503,6 +554,8 @@ router.get('/', async (req: Request, res: Response) => {
           position.fundingHistoryRaw = fundingData.filter(item => item.delta && item.delta.type === 'funding' && item.delta.coin === position.coin);
         });
       }
+    } catch (error) {
+      console.error('Error fetching Hyperliquid funding history:', error);
     }
 
     // Add fee data to each position (net gain will be calculated later with spot balances)
@@ -540,20 +593,13 @@ router.get('/', async (req: Request, res: Response) => {
     });
 
     // Fetch spot balances from Hyperliquid wallet
-    const spotResponse = await fetch('https://api.hyperliquid.xyz/info', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
+    const spotBalances: { [coin: string]: number } = {};
+    try {
+      const spotData = await fetchHyperliquidInfo<HyperliquidSpotState>({
         type: 'spotClearinghouseState',
         user: address,
-      }),
-    });
+      }, { ttlMs: 60 * 1000 });
 
-    const spotBalances: { [coin: string]: number } = {};
-    if (spotResponse.ok) {
-      const spotData = await spotResponse.json() as HyperliquidSpotState;
       if (spotData.balances && Array.isArray(spotData.balances)) {
         spotData.balances.forEach((balance) => {
           const coin = balance.coin;
@@ -563,6 +609,8 @@ router.get('/', async (req: Request, res: Response) => {
           }
         });
       }
+    } catch (error) {
+      console.error('Error fetching Hyperliquid spot balances:', error);
     }
 
     // Fetch ONLY redeemable Flexible Earn balances from Binance (excludes Spot and Locked)
@@ -885,21 +933,9 @@ router.get('/opportunities', async (req: Request, res: Response) => {
   try {
     // Fetch historical funding and volatility data in parallel
     const twentyFourHoursAgo = Date.now() - (24 * 60 * 60 * 1000);
-    const response = await fetch('https://api.hyperliquid.xyz/info', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        type: 'metaAndAssetCtxs',
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Hyperliquid meta API error: ${response.status} ${response.statusText}`);
-    }
-
-    const payload = (await response.json()) as HyperliquidMetaAndAssetCtxs;
+    const payload = await fetchHyperliquidInfo<HyperliquidMetaAndAssetCtxs>({
+      type: 'metaAndAssetCtxs',
+    }, { ttlMs: 5_000 });
     if (!Array.isArray(payload) || payload.length < 2) {
       throw new Error('Unexpected Hyperliquid meta payload structure');
     }
@@ -913,24 +949,66 @@ router.get('/opportunities', async (req: Request, res: Response) => {
     const fundingHistories: { [coin: string]: HyperliquidFundingHistoryItem[] } = {};
     const klinesData: { [coin: string]: any[] } = {};
 
+    const MAX_FUNDING_HISTORY_COINS = 40;
+
+    const byOpenInterest = universe
+      .map((asset, index) => {
+        const ctx = assetCtxs[index];
+        const openInterestBase = parseNumber(ctx?.openInterest);
+        const referencePrice = parseNumber(ctx?.markPx ?? ctx?.oraclePx ?? ctx?.midPx ?? undefined);
+        return {
+          coin: asset.name,
+          openInterestUsd: openInterestBase * referencePrice,
+        };
+      })
+      .filter(item => Number.isFinite(item.openInterestUsd) && item.openInterestUsd > 0)
+      .sort((a, b) => b.openInterestUsd - a.openInterestUsd);
+
+    const byVolume = universe
+      .map((asset, index) => {
+        const ctx = assetCtxs[index];
+        const dayNotionalVolumeUsd = parseNumber(ctx?.dayNtlVlm);
+        return {
+          coin: asset.name,
+          dayNotionalVolumeUsd,
+        };
+      })
+      .filter(item => Number.isFinite(item.dayNotionalVolumeUsd) && item.dayNotionalVolumeUsd > 0)
+      .sort((a, b) => b.dayNotionalVolumeUsd - a.dayNotionalVolumeUsd);
+
+    const coinsForHistory = new Set<string>();
+    const includeCoin = (coin: string) => {
+      if (!coinsForHistory.has(coin) && coinsForHistory.size < MAX_FUNDING_HISTORY_COINS) {
+        coinsForHistory.add(coin);
+      }
+    };
+
+    byOpenInterest.forEach(({ coin }) => includeCoin(coin));
+    if (coinsForHistory.size < MAX_FUNDING_HISTORY_COINS) {
+      byVolume.forEach(({ coin }) => includeCoin(coin));
+    }
+
     const dataFetchPromises = universe.map(async (asset) => {
       const coin = asset.name;
       if (asset.isDelisted) return;
+      if (!coinsForHistory.has(coin)) return;
 
-      const fundingPromise = fetch('https://api.hyperliquid.xyz/info', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type: 'fundingHistory',
-          coin: coin,
-          startTime: twentyFourHoursAgo,
-        }),
-      })
-        .then(res => (res.ok ? res.json() : Promise.resolve([])))
-        .catch(() => []);
+      const fundingPromise = fetchHyperliquidInfo<HyperliquidFundingHistoryItem[]>({
+        type: 'fundingHistory',
+        coin,
+        startTime: twentyFourHoursAgo,
+      }, { ttlMs: 10 * 60 * 1000 })
+        .catch((error) => {
+          console.error(`Error fetching funding history for ${coin} (opportunities):`, error);
+          return [] as HyperliquidFundingHistoryItem[];
+        });
 
       const binanceSymbol = `${coin.toUpperCase()}USDT`;
-      const klinesPromise = binanceService.getKlines(binanceSymbol, '1h', 24);
+      const klinesPromise = binanceService.getKlines(binanceSymbol, '1h', 24)
+        .catch((error: unknown) => {
+          console.error(`Error fetching Binance klines for ${coin}:`, error);
+          return [] as any[];
+        });
 
       const [fundingResult, klinesResult] = await Promise.all([
         fundingPromise,
