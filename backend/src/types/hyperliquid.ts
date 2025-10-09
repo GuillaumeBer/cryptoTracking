@@ -13,6 +13,11 @@ export interface HyperliquidPositionData {
   leverage: {
     value: string;
   };
+  cumFunding?: {
+    allTime?: string;
+    sinceOpen?: string;
+    sinceChange?: string;
+  };
 }
 
 export interface HyperliquidAssetPosition {
@@ -85,27 +90,35 @@ export interface HyperliquidFundingHistoryItem {
  * Meta and Asset Context Response (contains current funding rates)
  */
 export interface HyperliquidAssetContext {
-  funding: string; // Current funding rate
+  funding: string; // Current funding rate (hourly)
   openInterest: string;
-  prevDayPx: string;
-  dayNtlVlm: string;
-  premium: string;
-  oraclePx: string;
-  markPx: string;
-  midPx: string;
-  impactPxs: string[];
+  prevDayPx?: string | null;
+  dayNtlVlm?: string;
+  dayBaseVlm?: string;
+  premium?: string | null;
+  oraclePx?: string;
+  markPx?: string;
+  midPx?: string | null;
+  impactPxs?: string[] | null;
 }
 
 export interface HyperliquidUniverse {
   name: string;
   szDecimals: number;
   maxLeverage: number;
-  onlyIsolated: boolean;
+  onlyIsolated?: boolean;
+  isDelisted?: boolean;
+  marginTableId?: number;
 }
 
-export interface HyperliquidMetaAndAssetCtxsItem {
+export interface HyperliquidMetaResponse {
   universe: HyperliquidUniverse[];
-  assetCtxs: HyperliquidAssetContext[];
+  marginTables?: Array<[number, Record<string, unknown>]>;
 }
 
-export type HyperliquidMetaAndAssetCtxs = HyperliquidMetaAndAssetCtxsItem[];
+export type HyperliquidAssetContextsResponse = HyperliquidAssetContext[];
+
+export type HyperliquidMetaAndAssetCtxs = [
+  HyperliquidMetaResponse,
+  HyperliquidAssetContextsResponse
+];

@@ -46,7 +46,7 @@ interface HyperliquidPosition {
   leverage: number;
   distanceToLiquidation: number; // percentage
   distanceToLiquidationUsd: number;
-  fundingPnl?: number; // Total funding earned/paid (all time)
+  fundingPnl?: number; // Funding earned/paid since last position size change
   currentSessionFunding?: number; // Funding for current 8-hour session
   spotBalance?: number; // Spot balance from wallet/binance
   isDeltaNeutral?: boolean; // Whether position is matched with spot
@@ -57,11 +57,46 @@ interface HyperliquidPosition {
   binanceEquivalentFees?: number; // Estimated Binance SPOT fees for equivalent trades
   totalFees?: number; // Total fees (Hyperliquid + Binance equivalent)
   futureClosingFees?: number; // Estimated fees to close both positions
+  hyperliquidFeesSinceChange?: number;
+  binanceEquivalentFeesSinceChange?: number;
+  totalFeesSinceChange?: number;
   netGain?: number; // Net gain after all fees and imbalance: fundingPnl - totalFees - futureClosingFees
   netGainAdjusted?: number;
+  netRevenueCurrent?: number;
+  netRevenueAllTime?: number;
   tradeCount?: number;
   fundingRate?: FundingRateData;
   fundingHistoryRaw?: any[]; // For debugging
+  fundingPnlAllTime?: number; // Total funding accrued historically
+  openTimestamp?: number | null; // Timestamp when the current short was opened
+  lastChangeTimestamp?: number | null; // Timestamp of the last position size change
+  fundingPnlSinceOpen?: number; // Funding earned since the position was opened
+}
+
+interface HyperliquidOpportunity {
+  coin: string;
+  markPrice: number;
+  oraclePrice: number | null;
+  fundingRateHourly: number;
+  fundingRateDaily: number;
+  fundingRateAnnualized: number;
+  openInterestBase: number;
+  openInterestUsd: number;
+  dayNotionalVolumeUsd: number;
+  dayBaseVolume?: number;
+  premium?: number | null;
+  direction: 'short' | 'long';
+  opportunityScore: number;
+  liquidityScore: number;
+  volumeScore: number;
+  expectedDailyReturnPercent: number;
+  estimatedDailyPnlUsd: number;
+  estimatedMonthlyPnlUsd: number;
+  notionalUsd: number;
+  maxLeverage?: number;
+  szDecimals?: number;
+  onlyIsolated?: boolean;
+  marginTableId?: number;
 }
 
 
@@ -151,6 +186,18 @@ router.get('/', async (req: Request, res: Response) => {
 
         const distanceToLiquidationUsd = Math.abs((liquidationPx - markPrice) * Math.abs(szi));
 
+        const normalizeFunding = (value?: string): number | undefined => {
+          if (value === undefined || value === null) return undefined;
+          const parsed = parseFloat(value);
+          if (Number.isNaN(parsed)) return undefined;
+          // Hyperliquid returns negative values for funding earned on shorts.
+          return -parsed;
+        };
+
+        const fundingAllTime = normalizeFunding(positionData.cumFunding?.allTime);
+        const fundingSinceChange = normalizeFunding(positionData.cumFunding?.sinceChange);
+        const fundingSinceOpen = normalizeFunding(positionData.cumFunding?.sinceOpen);
+
         positions.push({
           coin,
           entryPrice,
@@ -164,6 +211,9 @@ router.get('/', async (req: Request, res: Response) => {
           leverage,
           distanceToLiquidation,
           distanceToLiquidationUsd,
+          fundingPnl: fundingSinceChange ?? fundingSinceOpen ?? undefined,
+          fundingPnlAllTime: fundingAllTime,
+          fundingPnlSinceOpen: fundingSinceOpen,
         });
       }
     }
@@ -273,12 +323,27 @@ router.get('/', async (req: Request, res: Response) => {
     const binanceFeesByCoin: { [coin: string]: number } = {};
     const tradeCountByCoin: { [coin: string]: number } = {};
     const BINANCE_SPOT_FEE_RATE = 0.001; // 0.1% standard rate
+    const positionOpenTimestamps: { [coin: string]: number | null } = {};
+    const positionChangeTimestamps: { [coin: string]: number | null } = {};
+    const feeEventsByCoin: {
+      [coin: string]: Array<{ time: number; hyperliquidFee: number; binanceFee: number }>;
+    } = {};
 
     if (fillsResponse.ok) {
       const fills = (await fillsResponse.json()) as HyperliquidUserFill[];
 
       if (Array.isArray(fills)) {
-        fills.forEach((fill) => {
+        const sortedFills = [...fills].sort((a, b) => a.time - b.time);
+        const MIN_POSITION_SIZE = 1e-9;
+        const shortStateByCoin: {
+          [coin: string]: {
+            openTimestamp: number | null;
+            lastChangeTimestamp: number | null;
+            shortSize: number;
+          };
+        } = {};
+
+        sortedFills.forEach((fill) => {
           const coin = fill.coin;
           const hyperliquidFee = parseFloat(fill.fee || '0');
           const builderFee = parseFloat(fill.builderFee || '0');
@@ -298,6 +363,54 @@ router.get('/', async (req: Request, res: Response) => {
           hyperliquidFeesByCoin[coin] += totalHyperliquidFee;
           binanceFeesByCoin[coin] += binanceFee;
           tradeCountByCoin[coin]++;
+          if (!feeEventsByCoin[coin]) {
+            feeEventsByCoin[coin] = [];
+          }
+          feeEventsByCoin[coin].push({
+            time: fill.time,
+            hyperliquidFee: totalHyperliquidFee,
+            binanceFee,
+          });
+
+          // Track lifecycle of short positions to determine when the current short was opened
+          const dir = (fill.dir || '').toLowerCase();
+          if (dir.includes('short')) {
+            const size = Math.abs(parseFloat(fill.sz || '0'));
+            if (!shortStateByCoin[coin]) {
+              shortStateByCoin[coin] = { openTimestamp: null, lastChangeTimestamp: null, shortSize: 0 };
+            }
+
+            const state = shortStateByCoin[coin];
+            const isIncreasing = dir.includes('open') || dir.includes('increase');
+            const isDecreasing = dir.includes('close') || dir.includes('decrease') || dir.includes('reduce');
+
+            if (isIncreasing) {
+              const wasFlat = state.shortSize <= MIN_POSITION_SIZE;
+              state.shortSize += size;
+              if (state.shortSize > MIN_POSITION_SIZE) {
+                state.lastChangeTimestamp = fill.time;
+                if (wasFlat) {
+                  state.openTimestamp = fill.time;
+                }
+              }
+            } else if (isDecreasing) {
+              state.shortSize = Math.max(0, state.shortSize - size);
+              if (state.shortSize <= MIN_POSITION_SIZE) {
+                state.shortSize = 0;
+                state.openTimestamp = null;
+                state.lastChangeTimestamp = null;
+              } else {
+                state.lastChangeTimestamp = fill.time;
+              }
+            }
+          }
+        });
+
+        Object.entries(shortStateByCoin).forEach(([coin, state]) => {
+          if (state.shortSize > MIN_POSITION_SIZE) {
+            positionOpenTimestamps[coin] = state.openTimestamp ?? null;
+            positionChangeTimestamps[coin] = state.lastChangeTimestamp ?? state.openTimestamp ?? null;
+          }
         });
       }
     }
@@ -315,8 +428,8 @@ router.get('/', async (req: Request, res: Response) => {
       }),
     });
 
-    let totalFundingPnl = 0;
-    const fundingByCoin: { [coin: string]: number } = {};
+    const fundingByCoinAllTime: { [coin: string]: number } = {};
+    const fundingByCoinSinceChange: { [coin: string]: number } = {};
     const currentSessionFundingByCoin: { [coin: string]: number } = {};
 
     if (fundingResponse.ok) {
@@ -333,11 +446,21 @@ router.get('/', async (req: Request, res: Response) => {
             const fundingTime = item.time;
 
             // All-time funding
-            if (!fundingByCoin[coin]) {
-              fundingByCoin[coin] = 0;
+            if (!fundingByCoinAllTime[coin]) {
+              fundingByCoinAllTime[coin] = 0;
             }
-            fundingByCoin[coin] += fundingAmount;
-            totalFundingPnl += fundingAmount;
+            fundingByCoinAllTime[coin] += fundingAmount;
+
+            // Funding since the current short was last changed (fallback to open time)
+            const sinceTimestamp = positionChangeTimestamps[coin] ?? positionOpenTimestamps[coin];
+            if (sinceTimestamp !== null && sinceTimestamp !== undefined) {
+              if (!fundingByCoinSinceChange[coin]) {
+                fundingByCoinSinceChange[coin] = 0;
+              }
+              if (fundingTime >= sinceTimestamp) {
+                fundingByCoinSinceChange[coin] += fundingAmount;
+              }
+            }
 
             // Current session (last 8 hours)
             if (fundingTime > eightHoursAgo) {
@@ -351,7 +474,25 @@ router.get('/', async (req: Request, res: Response) => {
 
         // Add funding PnL and raw history to positions
         shortPositions.forEach((position) => {
-          position.fundingPnl = fundingByCoin[position.coin] || 0;
+          const coin = position.coin;
+          const openTimestamp = positionOpenTimestamps[coin] ?? null;
+          const changeTimestamp = positionChangeTimestamps[coin] ?? null;
+          position.openTimestamp = openTimestamp ?? null;
+          position.lastChangeTimestamp = changeTimestamp ?? null;
+
+          if (position.fundingPnlAllTime === undefined) {
+            position.fundingPnlAllTime = fundingByCoinAllTime[coin] || 0;
+          }
+
+          if (position.fundingPnl === undefined) {
+            const sinceTimestamp = changeTimestamp ?? openTimestamp;
+            if (sinceTimestamp !== null && sinceTimestamp !== undefined) {
+              position.fundingPnl = fundingByCoinSinceChange[coin] ?? position.fundingPnlAllTime ?? 0;
+            } else {
+              position.fundingPnl = position.fundingPnlAllTime ?? 0;
+            }
+          }
+
           position.currentSessionFunding = currentSessionFundingByCoin[position.coin] || 0;
           position.fundingHistoryRaw = fundingData.filter(item => item.delta && item.delta.type === 'funding' && item.delta.coin === position.coin);
         });
@@ -361,10 +502,34 @@ router.get('/', async (req: Request, res: Response) => {
     // Add fee data to each position (net gain will be calculated later with spot balances)
     shortPositions.forEach((position) => {
       const coin = position.coin;
+      const allHyperliquidFees = hyperliquidFeesByCoin[coin] || 0;
+      const allBinanceFees = binanceFeesByCoin[coin] || 0;
+      const changeTimestamp = positionChangeTimestamps[coin] ?? position.openTimestamp ?? null;
 
-      position.hyperliquidFees = hyperliquidFeesByCoin[coin] || 0;
-      position.binanceEquivalentFees = binanceFeesByCoin[coin] || 0;
-      position.totalFees = position.hyperliquidFees + position.binanceEquivalentFees;
+      let currentHyperliquidFees = allHyperliquidFees;
+      let currentBinanceFees = allBinanceFees;
+      if (changeTimestamp !== null && changeTimestamp !== undefined) {
+        const events = feeEventsByCoin[coin] || [];
+        currentHyperliquidFees = events.reduce((sum, event) => {
+          if (event.time >= changeTimestamp) {
+            return sum + event.hyperliquidFee;
+          }
+          return sum;
+        }, 0);
+        currentBinanceFees = events.reduce((sum, event) => {
+          if (event.time >= changeTimestamp) {
+            return sum + event.binanceFee;
+          }
+          return sum;
+        }, 0);
+      }
+
+      position.hyperliquidFees = allHyperliquidFees;
+      position.binanceEquivalentFees = allBinanceFees;
+      position.hyperliquidFeesSinceChange = currentHyperliquidFees;
+      position.binanceEquivalentFeesSinceChange = currentBinanceFees;
+      position.totalFees = allHyperliquidFees + allBinanceFees;
+      position.totalFeesSinceChange = currentHyperliquidFees + currentBinanceFees;
       position.tradeCount = tradeCountByCoin[coin] || 0;
     });
 
@@ -520,15 +685,17 @@ router.get('/', async (req: Request, res: Response) => {
       // If more spot than long (negative deltaImbalance): we have unhedged long exposure (bullish exposure)
       // We don't directly subtract imbalance value as it's not a realized loss, but it's a risk exposure
 
-      // Net gain considering all fees (past + future)
-      const fundingRevenue = position.fundingPnl || 0;
-      const totalHistoricalFees = position.totalFees || 0;
-      position.netGain = fundingRevenue - totalHistoricalFees - position.futureClosingFees;
+      const futureClosingFees = position.futureClosingFees || 0;
+      const fundingCurrent = position.fundingPnl ?? 0;
+      const fundingAllTime = position.fundingPnlAllTime ?? fundingCurrent;
+      const totalFeesAllTime = position.totalFees ?? 0;
+      const totalFeesCurrent = position.totalFeesSinceChange ?? totalFeesAllTime;
 
-      // Adjusted net gain: Consider the imbalance as a risk factor
-      // For a conservative estimate, we can consider the imbalance value as potential exposure
-      // However, since it's not a realized P&L, we'll keep it separate for now
-      position.netGainAdjusted = position.netGain;
+      position.netRevenueCurrent = fundingCurrent - totalFeesCurrent - futureClosingFees;
+      position.netRevenueAllTime = fundingAllTime - totalFeesAllTime - futureClosingFees;
+
+      position.netGain = position.netRevenueCurrent;
+      position.netGainAdjusted = position.netRevenueAllTime;
 
       // Generate recommendation if not delta neutral
       if (!position.isDeltaNeutral && maxSize > 0) {
@@ -559,12 +726,29 @@ router.get('/', async (req: Request, res: Response) => {
       }
     });
 
+    const totalFundingPnl = shortPositions.reduce((sum, position) => sum + (position.fundingPnl ?? 0), 0);
+    const totalFundingPnlAllTime = shortPositions.reduce(
+      (sum, position) => sum + (position.fundingPnlAllTime ?? 0),
+      0
+    );
+    const totalNetRevenueCurrent = shortPositions.reduce(
+      (sum, position) => sum + (position.netRevenueCurrent ?? 0),
+      0
+    );
+    const totalNetRevenueAllTime = shortPositions.reduce(
+      (sum, position) => sum + (position.netRevenueAllTime ?? 0),
+      0
+    );
+
     res.json({
       success: true,
       data: {
         address,
         positions: shortPositions,
         totalFundingPnl,
+        totalFundingPnlAllTime,
+        totalNetRevenueCurrent,
+        totalNetRevenueAllTime,
         spotBalances,
         timestamp: new Date().toISOString(),
       },
@@ -574,6 +758,209 @@ router.get('/', async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error occurred',
+    });
+  }
+});
+
+router.get('/opportunities', async (req: Request, res: Response) => {
+  const parseStringParam = (value: unknown, defaultValue: string): string => {
+    if (Array.isArray(value)) {
+      return value.length > 0 ? String(value[0]) : defaultValue;
+    }
+    if (value === undefined || value === null) {
+      return defaultValue;
+    }
+    const strValue = String(value).trim();
+    return strValue.length > 0 ? strValue : defaultValue;
+  };
+
+  const parseNumericParam = (value: unknown, defaultValue: number): number => {
+    const raw = parseStringParam(value, String(defaultValue));
+    const parsed = Number.parseFloat(raw);
+    return Number.isFinite(parsed) ? parsed : defaultValue;
+  };
+
+  const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
+  const limit = clamp(Math.round(parseNumericParam(req.query.limit, 15)), 1, 100);
+  const minOpenInterestUsd = Math.max(0, parseNumericParam(req.query.minOpenInterestUsd, 500_000));
+  const minVolumeUsd = Math.max(0, parseNumericParam(req.query.minVolumeUsd, 250_000));
+  const notionalUsd = Math.max(1, parseNumericParam(req.query.notionalUsd, 10_000));
+
+  const directionParam = parseStringParam(req.query.direction, 'short').toLowerCase();
+  const sortParam = parseStringParam(req.query.sort, 'score').toLowerCase();
+
+  const directionFilter: 'short' | 'long' | 'all' =
+    directionParam === 'long' ? 'long' : directionParam === 'all' ? 'all' : 'short';
+
+  const allowedSorts = new Set(['score', 'funding', 'liquidity', 'volume']);
+  const sortKey: 'score' | 'funding' | 'liquidity' | 'volume' = allowedSorts.has(sortParam)
+    ? (sortParam as 'score' | 'funding' | 'liquidity' | 'volume')
+    : 'score';
+
+  const parseNumber = (value?: string | null): number => {
+    if (value === undefined || value === null) return 0;
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+
+  const computeScores = (fundingRateAnnualized: number, openInterestUsd: number, dayNotionalVolumeUsd: number) => {
+    const liquidityScore = Math.min(1, openInterestUsd / 5_000_000);
+    const volumeScore = Math.min(1, dayNotionalVolumeUsd / 2_000_000);
+    const opportunityScore = Math.abs(fundingRateAnnualized) * (0.6 + 0.25 * liquidityScore + 0.15 * volumeScore);
+    return { liquidityScore, volumeScore, opportunityScore };
+  };
+
+  try {
+    const response = await fetch('https://api.hyperliquid.xyz/info', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        type: 'metaAndAssetCtxs',
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Hyperliquid meta API error: ${response.status} ${response.statusText}`);
+    }
+
+    const payload = (await response.json()) as HyperliquidMetaAndAssetCtxs;
+    if (!Array.isArray(payload) || payload.length < 2) {
+      throw new Error('Unexpected Hyperliquid meta payload structure');
+    }
+
+    const [metaInfo, assetCtxs] = payload;
+    const universe = Array.isArray(metaInfo?.universe) ? metaInfo.universe : [];
+    if (!Array.isArray(assetCtxs)) {
+      throw new Error('Missing asset contexts in Hyperliquid payload');
+    }
+
+    const markets: HyperliquidOpportunity[] = universe
+      .map((asset, index) => {
+        const ctx = assetCtxs[index];
+        if (!ctx) return null;
+        if (asset.isDelisted) return null;
+
+        const markPrice = parseNumber(ctx.markPx ?? ctx.oraclePx);
+        const oraclePrice = ctx.oraclePx !== undefined ? parseNumber(ctx.oraclePx) : null;
+        const effectivePrice = markPrice > 0 ? markPrice : oraclePrice ?? 0;
+        if (effectivePrice <= 0) return null;
+
+        const openInterestBase = parseNumber(ctx.openInterest);
+        const openInterestUsd = openInterestBase * effectivePrice;
+        const dayNotionalVolumeUsd = parseNumber(ctx.dayNtlVlm);
+        const dayBaseVolume = parseNumber(ctx.dayBaseVlm);
+        const fundingRateHourly = parseNumber(ctx.funding);
+        const fundingRateDaily = fundingRateHourly * 24;
+        const fundingRateAnnualized = fundingRateHourly * 24 * 365;
+        const premium =
+          ctx.premium === null || ctx.premium === undefined ? null : parseNumber(ctx.premium);
+
+        const { liquidityScore, volumeScore, opportunityScore } = computeScores(
+          fundingRateAnnualized,
+          openInterestUsd,
+          dayNotionalVolumeUsd,
+        );
+
+        const direction: 'short' | 'long' = fundingRateHourly >= 0 ? 'short' : 'long';
+        const estimatedDailyPnlUsd = notionalUsd * fundingRateDaily;
+        const estimatedMonthlyPnlUsd = estimatedDailyPnlUsd * 30;
+
+        return {
+          coin: asset.name,
+          markPrice: effectivePrice,
+          oraclePrice,
+          fundingRateHourly,
+          fundingRateDaily,
+          fundingRateAnnualized,
+          openInterestBase,
+          openInterestUsd,
+          dayNotionalVolumeUsd,
+          dayBaseVolume: dayBaseVolume > 0 ? dayBaseVolume : undefined,
+          premium,
+          direction,
+          opportunityScore,
+          liquidityScore,
+          volumeScore,
+          expectedDailyReturnPercent: fundingRateDaily,
+          estimatedDailyPnlUsd,
+          estimatedMonthlyPnlUsd,
+          notionalUsd,
+          maxLeverage: asset.maxLeverage,
+          szDecimals: asset.szDecimals,
+          onlyIsolated: asset.onlyIsolated,
+          marginTableId: asset.marginTableId,
+        } as HyperliquidOpportunity;
+      })
+      .filter((market): market is HyperliquidOpportunity => market !== null);
+
+    const filteredMarkets = markets.filter((market) => {
+      if (directionFilter !== 'all' && market.direction !== directionFilter) {
+        return false;
+      }
+      if (market.openInterestUsd < minOpenInterestUsd) {
+        return false;
+      }
+      if (market.dayNotionalVolumeUsd < minVolumeUsd) {
+        return false;
+      }
+      return true;
+    });
+
+    const sortedMarkets = [...filteredMarkets].sort((a, b) => {
+      switch (sortKey) {
+        case 'funding':
+          return Math.abs(b.fundingRateAnnualized) - Math.abs(a.fundingRateAnnualized);
+        case 'liquidity':
+          return b.openInterestUsd - a.openInterestUsd;
+        case 'volume':
+          return b.dayNotionalVolumeUsd - a.dayNotionalVolumeUsd;
+        case 'score':
+        default:
+          return b.opportunityScore - a.opportunityScore;
+      }
+    });
+
+    const topMarkets = sortedMarkets.slice(0, limit);
+
+    const averageFundingAnnualized =
+      filteredMarkets.length > 0
+        ? filteredMarkets.reduce((sum, market) => sum + market.fundingRateAnnualized, 0) / filteredMarkets.length
+        : 0;
+
+    const averageAbsoluteFundingAnnualized =
+      filteredMarkets.length > 0
+        ? filteredMarkets.reduce((sum, market) => sum + Math.abs(market.fundingRateAnnualized), 0) / filteredMarkets.length
+        : 0;
+
+    res.json({
+      success: true,
+      data: {
+        fetchedAt: new Date().toISOString(),
+        filters: {
+          limit,
+          minOpenInterestUsd,
+          minVolumeUsd,
+          notionalUsd,
+          direction: directionFilter,
+          sort: sortKey,
+        },
+        totals: {
+          availableMarkets: markets.length,
+          filteredMarkets: filteredMarkets.length,
+          averageFundingAnnualized,
+          averageAbsoluteFundingAnnualized,
+        },
+        markets: topMarkets,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching Hyperliquid opportunities:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred while fetching opportunities',
     });
   }
 });

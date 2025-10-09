@@ -10,6 +10,22 @@ export const endpoints = {
   aave: (address: string) => `${API_BASE_URL}/api/aave?address=${address}`,
   jupiter: (address: string) => `${API_BASE_URL}/api/jupiter?address=${address}`,
   hyperliquid: (address: string) => `${API_BASE_URL}/api/hyperliquid?address=${address}`,
+  hyperliquidOpportunities: (params: {
+    limit?: number;
+    minOpenInterestUsd?: number;
+    minVolumeUsd?: number;
+    direction?: 'short' | 'long' | 'all';
+    sort?: 'score' | 'funding' | 'liquidity' | 'volume';
+    notionalUsd?: number;
+  } = {}) => {
+    const searchParams = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value === undefined || value === null) return;
+      searchParams.set(key, String(value));
+    });
+    const queryString = searchParams.toString();
+    return `${API_BASE_URL}/api/hyperliquid/opportunities${queryString ? `?${queryString}` : ''}`;
+  },
   onchain: (address: string) => `${API_BASE_URL}/api/onchain?address=${address}`,
   bnbScan: (address: string) => `${API_BASE_URL}/api/bnb-scan?address=${address}`,
   prices: () => `${API_BASE_URL}/api/prices`,

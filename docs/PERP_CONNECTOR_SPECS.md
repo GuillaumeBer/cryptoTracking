@@ -27,17 +27,38 @@ This document seeds the connector workstream for onboarding new perpetual venues
   3. Document throttling rules and fallback plan.
 
 ## Avantis
-- **API**: GraphQL (`https://api.avantisfi.com/graphql`) + REST for trades; on-chain access via Base RPC for the Trader SDK.
-- **Auth**:
-  - **Trader SDK**: no Avantis-issued key required. Provide your own Base RPC (`provider_url`) and optional WebSocket feed URL (per [Avantis Trader SDK docs](https://sdk.avantisfi.com/)).
-  - **GraphQL/REST analytics**: request read-only API key if higher rate limits or non-public datasets are needed.
-- **Queries**:
-  - `perpMarkets` for metadata.
-  - `fundingRates` with time range.
-  - `liquiditySnapshots` for depth + TVL.
+- **API**: GraphQL (`https://api.avantisfi.com/graphql`) for analytics + Trader SDK utilities (Base RPC access, pair cache) described at [sdk.avantisfi.com](https://sdk.avantisfi.com/getting_started.html#installation).
+- **Installation (optional but recommended for diagnostics)**:
+  ```bash
+  pip install avantis-trader-sdk
+  ```
+  ```python
+  import asyncio
+  from avantis_trader_sdk import TraderClient
+
+  async def main():
+      client = TraderClient("https://mainnet.base.org")
+      info = await client.pairs_cache.get_pairs_info()
+      print(info)
+
+  if __name__ == "__main__":
+      asyncio.run(main())
+  ```
+- **Auth / configuration**:
+  - `AVANTIS_GRAPHQL_URL` (defaults to `https://api.avantisfi.com/graphql`)
+  - `AVANTIS_BASE_RPC_URL` (defaults to `https://mainnet.base.org`) is passed to the SDK when run locally.
+  - GraphQL endpoint currently works without an API key; request read-only credentials if higher quotas are required.
+- **GraphQL queries**:
+  - `perpMarkets` for symbol metadata, funding, depth
+  - `fundingRates` for historical data
+  - `liquiditySnapshots` for TVL / depth
+- **Current connector implementation**:
+  - Live metadata pulled from `socket-api-pub.avantisfi.com` with mark price sourced via Pyth Hermes.
+  - Funding rate approximated from the venue’s dynamic margin fee with sign driven by open interest skew.
+  - Depth levels synthesized from the reported one-percent depth bands until native order book snapshots are exposed.
 - **Action items**:
   1. Define GraphQL fragments for scouting needs.
-  2. Confirm Base network RPC requirements for on-chain verification.
+  2. Confirm Base network RPC requirements (`AVANTIS_BASE_RPC_URL`) for on-chain verification.
   3. Document when to escalate for an Avantis API key (only if analytics endpoints require it).
 
 ## Jupiter Perps

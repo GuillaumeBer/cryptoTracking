@@ -76,12 +76,42 @@ BINANCE_API_KEY=your_binance_api_key
 BINANCE_API_SECRET=your_binance_api_secret
 ALCHEMY_API_KEY=your_alchemy_api_key
 GRAPH_API_KEY=your_graph_api_key
+ASTER_API_KEY=your_aster_api_key
+ASTER_SECRET_KEY=your_aster_secret_key
+AVANTIS_GRAPHQL_URL=https://api.avantisfi.com/graphql
+AVANTIS_BASE_RPC_URL=https://mainnet.base.org
 ```
 
 #### Frontend (`frontend/.env.local`)
 ```env
 NEXT_PUBLIC_API_URL=http://localhost:3001
 ```
+
+### Avantis Trader SDK (optional)
+
+Some Avantis utilities (pair discovery, Base RPC verification) are easier to run with the official Trader SDK.  
+If you have Python 3.6+ installed, you can add it to your toolbelt with:
+
+```bash
+pip install avantis-trader-sdk
+```
+
+Example quick check (prints available pairs):
+
+```python
+import asyncio
+from avantis_trader_sdk import TraderClient
+
+async def main():
+    client = TraderClient("https://mainnet.base.org")
+    info = await client.pairs_cache.get_pairs_info()
+    print(info)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Using the SDK is optional for the app itself, but it is handy for local diagnostics and verifying that your Base RPC endpoint is reachable.
 
 ### Running the Application
 

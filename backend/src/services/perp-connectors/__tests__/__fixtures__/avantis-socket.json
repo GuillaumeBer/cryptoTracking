@@ -1,0 +1,27 @@
+{
+  "data": {
+    "pairInfos": {
+      "0": {
+        "from": "ETH",
+        "to": "USD",
+        "feed": { "feedId": "0xfeed1234" },
+        "pairOI": 123456,
+        "pairMinLevPosUSDC": 50,
+        "marginFee": { "long": 0.001, "short": 0.0015 },
+        "openInterest": { "long": 60000, "short": 40000 },
+        "groupIndex": 1,
+        "feeIndex": 2,
+        "openFeeP": 0.0008,
+        "limitOrderFeeP": 0.0004,
+        "closeFeeP": 0.0008,
+        "priceImpactMultiplier": 1.2,
+        "skewImpactMultiplier": 0.25,
+        "lossProtectionMultiplier": { "0": 0 },
+        "pairParams": {
+          "onePercentDepthBelow": 5000,
+          "onePercentDepthAbove": 10000
+        }
+      }
+    }
+  }
+}

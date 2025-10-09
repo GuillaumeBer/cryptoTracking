@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import Link from 'next/link';
 import { endpoints } from '@/lib/api-config';
 
@@ -89,13 +89,96 @@ interface PerpConnectorSummary {
   source: 'mock' | 'live';
 }
 
+type OpportunityDirection = 'short' | 'long';
+type OpportunityDirectionFilter = OpportunityDirection | 'all';
+type OpportunitySort = 'score' | 'funding' | 'liquidity' | 'volume';
+
+interface HyperliquidOpportunity {
+  coin: string;
+  markPrice: number;
+  oraclePrice: number | null;
+  fundingRateHourly: number;
+  fundingRateDaily: number;
+  fundingRateAnnualized: number;
+  openInterestBase: number;
+  openInterestUsd: number;
+  dayNotionalVolumeUsd: number;
+  dayBaseVolume?: number;
+  premium?: number | null;
+  direction: OpportunityDirection;
+  opportunityScore: number;
+  liquidityScore: number;
+  volumeScore: number;
+  expectedDailyReturnPercent: number;
+  estimatedDailyPnlUsd: number;
+  estimatedMonthlyPnlUsd: number;
+  notionalUsd: number;
+  maxLeverage?: number;
+  szDecimals?: number;
+  onlyIsolated?: boolean;
+  marginTableId?: number;
+}
+
+interface HyperliquidOpportunityTotals {
+  availableMarkets: number;
+  filteredMarkets: number;
+  averageFundingAnnualized: number;
+  averageAbsoluteFundingAnnualized: number;
+}
+
+interface HyperliquidOpportunityFilters {
+  limit: number;
+  minOpenInterestUsd: number;
+  minVolumeUsd: number;
+  direction: OpportunityDirectionFilter;
+  sort: OpportunitySort;
+  notionalUsd: number;
+}
+
+interface HyperliquidOpportunityPayload {
+  fetchedAt: string;
+  filters: HyperliquidOpportunityFilters;
+  totals: HyperliquidOpportunityTotals;
+  markets: HyperliquidOpportunity[];
+}
+
+interface HyperliquidOpportunityResponse {
+  success: boolean;
+  data?: HyperliquidOpportunityPayload;
+  error?: string;
+}
+
+const DEFAULT_OPPORTUNITY_FILTERS: HyperliquidOpportunityFilters = {
+  limit: 12,
+  minOpenInterestUsd: 500_000,
+  minVolumeUsd: 250_000,
+  direction: 'short',
+  sort: 'score',
+  notionalUsd: 10_000,
+};
+
+const OPPORTUNITY_OPEN_INTEREST_OPTIONS = [
+  { label: '$0', value: 0 },
+  { label: '$250k', value: 250_000 },
+  { label: '$500k', value: 500_000 },
+  { label: '$1M', value: 1_000_000 },
+  { label: '$5M', value: 5_000_000 },
+] as const;
+
+const OPPORTUNITY_VOLUME_OPTIONS = [
+  { label: '$0', value: 0 },
+  { label: '$100k', value: 100_000 },
+  { label: '$250k', value: 250_000 },
+  { label: '$1M', value: 1_000_000 },
+  { label: '$5M', value: 5_000_000 },
+] as const;
+
 export default function HyperliquidPage() {
   const [walletAddress, setWalletAddress] = useState(process.env.NEXT_PUBLIC_DEFAULT_EVM_ADDRESS || '');
   const [positions, setPositions] = useState<HyperliquidPosition[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
-  const [totalFundingPnl, setTotalFundingPnl] = useState(0);
   const [totalNetGain, setTotalNetGain] = useState(0);
   const [totalNetGainAllTime, setTotalNetGainAllTime] = useState(0);
   const [isClient, setIsClient] = useState(false);
@@ -104,8 +187,17 @@ export default function HyperliquidPage() {
   const [perpMode, setPerpMode] = useState<'auto' | 'mock' | 'live'>('auto');
   const [perpLoading, setPerpLoading] = useState(false);
   const [perpError, setPerpError] = useState<string | null>(null);
+  const [opportunities, setOpportunities] = useState<HyperliquidOpportunity[]>([]);
+  const [opportunityTotals, setOpportunityTotals] = useState<HyperliquidOpportunityTotals | null>(null);
+  const [opportunityFilters, setOpportunityFilters] = useState<HyperliquidOpportunityFilters>(DEFAULT_OPPORTUNITY_FILTERS);
+  const [opportunitiesLoading, setOpportunitiesLoading] = useState(false);
+  const [opportunitiesError, setOpportunitiesError] = useState<string | null>(null);
+  const [lastOpportunityFetch, setLastOpportunityFetch] = useState<Date | null>(null);
+  const [opportunityDraftNotional, setOpportunityDraftNotional] = useState(
+    String(DEFAULT_OPPORTUNITY_FILTERS.notionalUsd),
+  );
 
-  const fetchPositions = async () => {
+  const fetchPositions = useCallback(async () => {
     if (!walletAddress) {
       setError('Please enter a wallet address');
       return;
@@ -121,7 +213,6 @@ export default function HyperliquidPage() {
       if (result.success) {
         const positionsData = result.data.positions || [];
         setPositions(positionsData);
-        setTotalFundingPnl(result.data.totalFundingPnl || 0);
 
         // Calculate total net gain/loss from all positions
         const totalNet = positionsData.reduce((sum: number, pos: HyperliquidPosition) => sum + (pos.netGain || 0), 0);
@@ -141,17 +232,17 @@ export default function HyperliquidPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [walletAddress]);
 
   // Auto-refresh every 30 seconds
   useEffect(() => {
-    if (walletAddress) {
-      fetchPositions();
-      const interval = setInterval(fetchPositions, 30000);
-      return () => clearInterval(interval);
+    if (!walletAddress) {
+      return;
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [walletAddress]);
+    fetchPositions();
+    const interval = setInterval(fetchPositions, 30000);
+    return () => clearInterval(interval);
+  }, [walletAddress, fetchPositions]);
 
   useEffect(() => {
     setIsClient(true);
@@ -180,8 +271,205 @@ export default function HyperliquidPage() {
     fetchPerpConnectors('auto');
     const interval = setInterval(() => fetchPerpConnectors('auto'), 60_000);
     return () => clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const fetchHyperliquidOpportunities = useCallback(async (filters: HyperliquidOpportunityFilters) => {
+    setOpportunitiesLoading(true);
+    setOpportunitiesError(null);
+
+    const requestUrl = endpoints.hyperliquidOpportunities(filters);
+
+    const computeScores = (fundingRateAnnualized: number, openInterestUsd: number, dayNotionalVolumeUsd: number) => {
+      const liquidityScore = Math.min(1, openInterestUsd / 5_000_000);
+      const volumeScore = Math.min(1, dayNotionalVolumeUsd / 2_000_000);
+      const opportunityScore =
+        Math.abs(fundingRateAnnualized) * (0.6 + 0.25 * liquidityScore + 0.15 * volumeScore);
+      return { liquidityScore, volumeScore, opportunityScore };
+    };
+
+    const getFallbackFromConnectors = (): { markets: HyperliquidOpportunity[]; totals: HyperliquidOpportunityTotals } | null => {
+      if (perpConnectors.length === 0) {
+        return null;
+      }
+
+      const candidates: HyperliquidOpportunity[] = [];
+
+      perpConnectors.forEach((connector) => {
+        connector.markets.forEach((market) => {
+          if (!Number.isFinite(market.markPrice) || market.markPrice <= 0) {
+            return;
+          }
+
+          const markPrice = Number(market.markPrice);
+          const openInterestUsd = Number(market.openInterestUsd ?? 0);
+          const openInterestBase = markPrice > 0 ? openInterestUsd / markPrice : 0;
+          const dayNotionalVolumeUsd = (() => {
+            if (
+              typeof market.extra === 'object' &&
+              market.extra !== null &&
+              'dayNotionalVolumeUsd' in market.extra
+            ) {
+              const raw = (market.extra as Record<string, unknown>)['dayNotionalVolumeUsd'];
+              if (typeof raw === 'number') {
+                return raw;
+              }
+              if (typeof raw === 'string') {
+                const parsed = Number(raw);
+                return Number.isFinite(parsed) ? parsed : 0;
+              }
+            }
+            return 0;
+          })();
+          const fundingRateHourly = Number(market.fundingRateHourly ?? 0);
+          const fundingRateAnnualized = Number.isFinite(market.fundingRateAnnualized)
+            ? Number(market.fundingRateAnnualized)
+            : fundingRateHourly * 24 * 365;
+          const fundingRateDaily = fundingRateHourly * 24;
+          const { liquidityScore, volumeScore, opportunityScore } = computeScores(
+            fundingRateAnnualized,
+            openInterestUsd,
+            dayNotionalVolumeUsd,
+          );
+          const direction: OpportunityDirection = fundingRateHourly >= 0 ? 'short' : 'long';
+
+          candidates.push({
+            coin: `${connector.meta.name}: ${market.symbol}`,
+            markPrice,
+            oraclePrice: null,
+            fundingRateHourly,
+            fundingRateDaily,
+            fundingRateAnnualized,
+            openInterestBase,
+            openInterestUsd,
+            dayNotionalVolumeUsd,
+            dayBaseVolume: undefined,
+            premium: undefined,
+            direction,
+            opportunityScore,
+            liquidityScore,
+            volumeScore,
+            expectedDailyReturnPercent: fundingRateDaily,
+            estimatedDailyPnlUsd: filters.notionalUsd * fundingRateDaily,
+            estimatedMonthlyPnlUsd: filters.notionalUsd * fundingRateDaily * 30,
+            notionalUsd: filters.notionalUsd,
+            maxLeverage: undefined,
+            szDecimals: undefined,
+            onlyIsolated: undefined,
+            marginTableId: undefined,
+          });
+        });
+      });
+
+      if (candidates.length === 0) {
+        return null;
+      }
+
+      const filtered = candidates.filter((market) => {
+        if (filters.direction !== 'all' && market.direction !== filters.direction) {
+          return false;
+        }
+        if (market.openInterestUsd < filters.minOpenInterestUsd) {
+          return false;
+        }
+        if (market.dayNotionalVolumeUsd < filters.minVolumeUsd) {
+          return false;
+        }
+        return true;
+      });
+
+      const sorter = (a: HyperliquidOpportunity, b: HyperliquidOpportunity) => {
+        switch (filters.sort) {
+          case 'funding':
+            return Math.abs(b.fundingRateAnnualized) - Math.abs(a.fundingRateAnnualized);
+          case 'liquidity':
+            return b.openInterestUsd - a.openInterestUsd;
+          case 'volume':
+            return b.dayNotionalVolumeUsd - a.dayNotionalVolumeUsd;
+          case 'score':
+          default:
+            return b.opportunityScore - a.opportunityScore;
+        }
+      };
+
+      const sorted = [...filtered].sort(sorter);
+      const limited = sorted.slice(0, filters.limit);
+
+      const averageFunding =
+        limited.length > 0
+          ? limited.reduce((sum, item) => sum + item.fundingRateAnnualized, 0) / limited.length
+          : 0;
+      const averageAbsFunding =
+        limited.length > 0
+          ? limited.reduce((sum, item) => sum + Math.abs(item.fundingRateAnnualized), 0) / limited.length
+          : 0;
+
+      return {
+        markets: limited,
+        totals: {
+          availableMarkets: candidates.length,
+          filteredMarkets: filtered.length,
+          averageFundingAnnualized: averageFunding,
+          averageAbsoluteFundingAnnualized: averageAbsFunding,
+        },
+      };
+    };
+
+    try {
+      const response = await fetch(requestUrl);
+      const rawBody = await response.text();
+
+      let parsed: HyperliquidOpportunityResponse | null = null;
+
+      if (rawBody.trim().length > 0) {
+        try {
+          parsed = JSON.parse(rawBody) as HyperliquidOpportunityResponse;
+        } catch {
+          const snippet = rawBody.slice(0, 140).replace(/\s+/g, ' ').trim();
+          console.warn('Hyperliquid opportunities response was not JSON:', {
+            status: response.status,
+            url: requestUrl,
+            snippet,
+          });
+          throw new Error(`Received non-JSON response (HTTP ${response.status}) from ${requestUrl}.`);
+        }
+      }
+
+      if (!response.ok || !parsed?.success || !parsed.data) {
+        const message =
+          parsed?.error ||
+          `Failed to fetch opportunities (HTTP ${response.status} ${response.statusText || ''})`;
+        throw new Error(message);
+      }
+
+      setOpportunities(parsed.data.markets || []);
+      setOpportunityTotals(parsed.data.totals || null);
+      setLastOpportunityFetch(new Date(parsed.data.fetchedAt));
+    } catch (err) {
+      console.error('Failed to load Hyperliquid opportunities:', err);
+      const fallbackData = getFallbackFromConnectors();
+      const baseMessage =
+        err instanceof Error ? err.message : 'Unable to load Hyperliquid opportunities';
+
+      if (fallbackData) {
+        setOpportunities(fallbackData.markets);
+        setOpportunityTotals(fallbackData.totals);
+        setLastOpportunityFetch(new Date());
+        setOpportunitiesError(`${baseMessage}. Showing fallback from connector feed.`);
+      } else {
+        setOpportunities([]);
+        setOpportunityTotals(null);
+        setOpportunitiesError(baseMessage);
+      }
+    } finally {
+      setOpportunitiesLoading(false);
+    }
+  }, [perpConnectors]);
+
+  useEffect(() => {
+    fetchHyperliquidOpportunities(opportunityFilters);
+    const interval = setInterval(() => fetchHyperliquidOpportunities(opportunityFilters), 120_000);
+    return () => clearInterval(interval);
+  }, [fetchHyperliquidOpportunities, opportunityFilters]);
 
   const formatNumber = (value: number, decimals: number = 2) => {
     return new Intl.NumberFormat('en-US', {
@@ -246,8 +534,53 @@ export default function HyperliquidPage() {
     return `${hours}h ${minutes}m`;
   };
 
+  const handleOpportunityDirectionChange = (direction: OpportunityDirectionFilter) => {
+    setOpportunityFilters((prev) => (prev.direction === direction ? prev : { ...prev, direction }));
+  };
+
+  const handleOpportunitySortChange = (sort: OpportunitySort) => {
+    setOpportunityFilters((prev) => (prev.sort === sort ? prev : { ...prev, sort }));
+  };
+
+  const handleOpportunityMinOpenInterestChange = (value: number) => {
+    setOpportunityFilters((prev) =>
+      prev.minOpenInterestUsd === value ? prev : { ...prev, minOpenInterestUsd: value },
+    );
+  };
+
+  const handleOpportunityMinVolumeChange = (value: number) => {
+    setOpportunityFilters((prev) =>
+      prev.minVolumeUsd === value ? prev : { ...prev, minVolumeUsd: value },
+    );
+  };
+
+  const handleOpportunityLimitChange = (value: number) => {
+    const boundedValue = Math.min(Math.max(value, 5), 30);
+    setOpportunityFilters((prev) => (prev.limit === boundedValue ? prev : { ...prev, limit: boundedValue }));
+  };
+
+  const applyOpportunityNotional = () => {
+    const parsed = Number.parseFloat(opportunityDraftNotional.replace(/,/g, ''));
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setOpportunityDraftNotional(String(opportunityFilters.notionalUsd));
+      return;
+    }
+    const normalized = Math.max(100, Math.round(parsed / 100) * 100);
+    if (normalized !== opportunityFilters.notionalUsd) {
+      setOpportunityFilters((prev) => ({ ...prev, notionalUsd: normalized }));
+    }
+    setOpportunityDraftNotional(String(normalized));
+  };
+
+  const handleOpportunityRefresh = () => {
+    fetchHyperliquidOpportunities(opportunityFilters);
+  };
+
+  const bestOpportunityScore = useMemo(() => {
+    return opportunities.reduce((max, item) => Math.max(max, item.opportunityScore), 0);
+  }, [opportunities]);
+
   const totalPositionValue = positions.reduce((sum, pos) => sum + Math.abs(pos.positionValueUsd), 0);
-  const totalUnrealizedPnl = positions.reduce((sum, pos) => sum + pos.unrealizedPnl, 0);
   const deltaNeutralPositions = positions.filter(p => p.isDeltaNeutral);
 
   const renderConnectorCard = (connector: PerpConnectorResult, summary: PerpConnectorSummary | undefined) => {
@@ -338,7 +671,7 @@ export default function HyperliquidPage() {
                   <div>
                     <span className="block font-medium text-slate-600 dark:text-slate-300">Fees</span>
                     <span>
-                      Maker {formatNumber(market.makerFeeBps / 100, 2)} bps · Taker {formatNumber(market.takerFeeBps / 100, 2)} bps
+                      Maker {formatNumber(market.makerFeeBps / 100, 2)} bps -À Taker {formatNumber(market.takerFeeBps / 100, 2)} bps
                     </span>
                   </div>
                   <div>
@@ -373,6 +706,298 @@ export default function HyperliquidPage() {
             <h1 className="text-4xl sm:text-5xl font-bold text-slate-900 dark:text-white">
               Hyperliquid Delta Neutral
             </h1>
+
+            <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800/70 bg-white/80 dark:bg-slate-900/50 shadow-sm">
+              <div className="p-5 border-b border-slate-200/60 dark:border-slate-800/60 space-y-4">
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div className="space-y-2">
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Hyperliquid Funding Opportunities</h2>
+                    <p className="text-sm text-slate-500 dark:text-slate-400">
+                      Scan live markets where funding works in your favor. Estimates assume a{' '}
+                      <span className="font-medium text-slate-700 dark:text-slate-200">{formatCurrency(opportunityFilters.notionalUsd)}</span> delta-neutral short per market.
+                    </p>
+                    {opportunityTotals && (
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Showing {Math.min(opportunityFilters.limit, opportunityTotals.filteredMarkets)} of {opportunityTotals.filteredMarkets} matches · Universe {opportunityTotals.availableMarkets} markets
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <div className="flex rounded-full border border-slate-200 dark:border-slate-700 bg-slate-100/70 dark:bg-slate-800/50 p-1">
+                      {(['short', 'all', 'long'] as OpportunityDirectionFilter[]).map((option) => {
+                        const isActive = opportunityFilters.direction === option;
+                        const activeClasses =
+                          option === 'short'
+                            ? 'bg-emerald-500 text-white hover:bg-emerald-600'
+                            : option === 'long'
+                              ? 'bg-rose-500 text-white hover:bg-rose-600'
+                              : 'bg-slate-900 text-white hover:bg-slate-950';
+                        return (
+                          <button
+                            key={option}
+                            onClick={() => handleOpportunityDirectionChange(option)}
+                            className={`px-3 py-1 text-xs font-medium rounded-full transition-colors duration-150 ${
+                              isActive
+                                ? activeClasses
+                                : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100'
+                            }`}
+                          >
+                            {option === 'short' ? 'Short Collect' : option === 'long' ? 'Long Collect' : 'All'}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <button
+                      onClick={handleOpportunityRefresh}
+                      className="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium rounded-full border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                    >
+                      <svg className={`w-3.5 h-3.5 ${opportunitiesLoading ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582M20 20v-5h-.581M5.5 9A7.5 7.5 0 0117 6.5M18.5 15A7.5 7.5 0 017 17.5" />
+                      </svg>
+                      Refresh
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide">Sort</span>
+                    <select
+                      value={opportunityFilters.sort}
+                      onChange={(event) => handleOpportunitySortChange(event.target.value as OpportunitySort)}
+                      className="px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-400/60"
+                    >
+                      <option value="score">Score (blended)</option>
+                      <option value="funding">Funding (|APR|)</option>
+                      <option value="liquidity">Open Interest</option>
+                      <option value="volume">24h Volume</option>
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide">Open Interest ≥</span>
+                    <select
+                      value={opportunityFilters.minOpenInterestUsd}
+                      onChange={(event) => handleOpportunityMinOpenInterestChange(Number(event.target.value))}
+                      className="px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-400/60"
+                    >
+                      {OPPORTUNITY_OPEN_INTEREST_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide">24h Volume ≥</span>
+                    <select
+                      value={opportunityFilters.minVolumeUsd}
+                      onChange={(event) => handleOpportunityMinVolumeChange(Number(event.target.value))}
+                      className="px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-400/60"
+                    >
+                      {OPPORTUNITY_VOLUME_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide">Show</span>
+                    <select
+                      value={opportunityFilters.limit}
+                      onChange={(event) => handleOpportunityLimitChange(Number(event.target.value))}
+                      className="px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-400/60"
+                    >
+                      {[6, 12, 18, 24, 30].map((value) => (
+                        <option key={value} value={value}>
+                          {value}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide">Notional</span>
+                    <div className="flex items-center gap-2">
+                      <div className="relative">
+                        <span className="absolute inset-y-0 left-2 flex items-center text-xs text-slate-400">$</span>
+                        <input
+                          type="number"
+                          value={opportunityDraftNotional}
+                          onChange={(event) => setOpportunityDraftNotional(event.target.value)}
+                          onBlur={applyOpportunityNotional}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') {
+                              event.preventDefault();
+                              applyOpportunityNotional();
+                            }
+                          }}
+                          className="pl-5 pr-3 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-400/60 w-28"
+                        />
+                      </div>
+                      <button
+                        onClick={applyOpportunityNotional}
+                        className="px-3 py-1.5 text-xs font-medium rounded-lg bg-emerald-500 text-white hover:bg-emerald-600 transition-colors"
+                      >
+                        Apply
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {opportunitiesError && (
+                <div className="px-5 py-3 text-sm text-rose-600 dark:text-rose-400 border-b border-rose-200/60 dark:border-rose-900/40 bg-rose-50/50 dark:bg-rose-950/15">
+                  {opportunitiesError}
+                </div>
+              )}
+
+              <div className="p-5 space-y-5">
+                <div className="flex flex-wrap items-center gap-4 text-sm text-slate-500 dark:text-slate-400">
+                  <span>
+                    Avg |funding| APR {formatPercent(opportunityTotals?.averageAbsoluteFundingAnnualized ?? 0, 2)}
+                  </span>
+                  <span>
+                    Avg signed APR {formatPercent(opportunityTotals?.averageFundingAnnualized ?? 0, 2)}
+                  </span>
+                  {lastOpportunityFetch && (
+                    <span>Updated {lastOpportunityFetch.toLocaleTimeString()}</span>
+                  )}
+                  {opportunitiesLoading && (
+                    <span className="inline-flex items-center gap-2">
+                      <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v4m0 8v4m8-8h-4M8 12H4" />
+                      </svg>
+                      Refreshing…
+                    </span>
+                  )}
+                </div>
+
+                {opportunitiesLoading && opportunities.length === 0 ? (
+                  <div className="flex items-center gap-3 text-sm text-slate-500 dark:text-slate-400">
+                    <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v4m0 8v4m8-8h-4M8 12H4" />
+                    </svg>
+                    Loading funding opportunities...
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {opportunities.map((market) => {
+                      const normalizedScore = bestOpportunityScore > 0 ? Math.min(market.opportunityScore / bestOpportunityScore, 1) : 0;
+                      const scoreDisplay = Math.round(normalizedScore * 100);
+                      const scoreBarWidth = `${Math.max(8, normalizedScore * 100)}%`;
+                      const directionBadgeClasses = market.direction === 'short'
+                        ? 'bg-emerald-500/90 text-white'
+                        : 'bg-rose-500/90 text-white';
+                      const directionLabel = market.direction === 'short' ? 'Short collects funding' : 'Long collects funding';
+                      const fundingColor = market.fundingRateAnnualized >= 0
+                        ? 'text-emerald-600 dark:text-emerald-400'
+                        : 'text-rose-600 dark:text-rose-400';
+
+                      return (
+                        <div
+                          key={market.coin}
+                          className="rounded-xl border border-slate-200/70 dark:border-slate-700/60 bg-white/80 dark:bg-slate-900/50 p-5 shadow-sm hover:shadow-md transition-all duration-200"
+                        >
+                          <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+                            <div className="space-y-1">
+                              <div className="flex flex-wrap items-center gap-3">
+                                <h3 className="text-lg font-semibold text-slate-900 dark:text-white">{market.coin}</h3>
+                                {typeof market.maxLeverage === 'number' && (
+                                  <span className="text-xs font-medium px-2 py-1 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                                    Max {formatNumber(market.maxLeverage, 0)}x
+                                  </span>
+                                )}
+                                {market.onlyIsolated && (
+                                  <span className="text-xs font-medium px-2 py-1 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300">
+                                    Isolated only
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-xs text-slate-500 dark:text-slate-400">
+                                Mark {formatCurrency(market.markPrice)}{market.oraclePrice && Math.abs(market.markPrice - market.oraclePrice) / (market.oraclePrice || 1) > 0.002 ? ` · Oracle ${formatCurrency(market.oraclePrice)}` : ''}
+                              </p>
+                            </div>
+                            <span className={`inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-full ${directionBadgeClasses}`}>
+                              {directionLabel}
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 text-sm">
+                            <div>
+                              <span className="block text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">Funding (Annual)</span>
+                              <p className={`text-lg font-semibold ${fundingColor}`}>
+                                {formatPercent(market.fundingRateAnnualized, 2)}
+                              </p>
+                              <p className="text-xs text-slate-500 dark:text-slate-400">
+                                Daily {formatPercent(market.expectedDailyReturnPercent, 2)}
+                              </p>
+                            </div>
+                            <div>
+                              <span className="block text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">Open Interest</span>
+                              <p className="text-lg font-semibold text-slate-900 dark:text-white">
+                                {formatCurrency(market.openInterestUsd)}
+                              </p>
+                              <p className="text-xs text-slate-500 dark:text-slate-400">
+                                {formatNumber(market.openInterestBase, 2)} {market.coin}
+                              </p>
+                            </div>
+                            <div>
+                              <span className="block text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">24h Volume</span>
+                              <p className="text-lg font-semibold text-slate-900 dark:text-white">
+                                {formatCurrency(market.dayNotionalVolumeUsd)}
+                              </p>
+                              {market.dayBaseVolume && (
+                                <p className="text-xs text-slate-500 dark:text-slate-400">
+                                  {formatNumber(market.dayBaseVolume, 2)} {market.coin}
+                                </p>
+                              )}
+                            </div>
+                            <div>
+                              <span className="block text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">Est Funding (Daily)</span>
+                              <p className={`text-lg font-semibold ${market.estimatedDailyPnlUsd >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                                {formatSignedCurrency(market.estimatedDailyPnlUsd)}
+                              </p>
+                              <p className="text-xs text-slate-500 dark:text-slate-400">
+                                Monthly {formatSignedCurrency(market.estimatedMonthlyPnlUsd)}
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
+                            {market.premium !== undefined && market.premium !== null && (
+                              <span>Basis: {formatPercent(market.premium, 2)}</span>
+                            )}
+                            <span>Score blends funding strength with liquidity depth.</span>
+                          </div>
+
+                          <div className="mt-3 flex items-center gap-3">
+                            <div className="flex-1 h-2 bg-slate-200/70 dark:bg-slate-800/60 rounded-full overflow-hidden">
+                              <div
+                                className={`h-2 ${market.direction === 'short' ? 'bg-emerald-500' : 'bg-rose-500'}`}
+                                style={{ width: scoreBarWidth }}
+                              />
+                            </div>
+                            <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+                              Score {scoreDisplay}/100
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    {opportunities.length === 0 && !opportunitiesLoading && (
+                      <p className="text-sm text-slate-500 dark:text-slate-400">
+                        No markets match your filters yet. Try relaxing the liquidity thresholds.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
 
             <div className="rounded-2xl border border-slate-200/70 dark:border-slate-800/70 bg-white/70 dark:bg-slate-900/50 shadow-sm">
               <div className="p-5 border-b border-slate-200/60 dark:border-slate-800/60 flex flex-wrap items-center justify-between gap-4">
@@ -525,7 +1150,7 @@ export default function HyperliquidPage() {
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
-                Last updated: {lastUpdate.toLocaleTimeString()} • Auto-refresh: 30s
+                Last updated: {lastUpdate.toLocaleTimeString()} ÔÇó Auto-refresh: 30s
               </div>
             )}
           </div>
@@ -622,7 +1247,7 @@ export default function HyperliquidPage() {
                             </svg>
                           </div>
                           <p className="text-sm font-medium text-slate-500 dark:text-slate-400">
-                            {formatCurrency(position.positionValueUsd)} • {Math.abs(position.leverage)}x leverage
+                            {formatCurrency(position.positionValueUsd)} ÔÇó {Math.abs(position.leverage)}x leverage
                           </p>
                         </div>
                       </div>
@@ -730,7 +1355,7 @@ export default function HyperliquidPage() {
                           </div>
                           {position.isDeltaNeutral && (
                             <span className="text-xs font-medium text-emerald-600 dark:text-emerald-400">
-                              ✓ Balanced
+                              Ô£ô Balanced
                             </span>
                           )}
                         </div>
@@ -769,7 +1394,7 @@ export default function HyperliquidPage() {
                       </div>
 
                       <div className="mt-4 text-xs text-center text-slate-500 dark:text-slate-400 font-medium">
-                        Click to view detailed information ↓
+                        Click to view detailed information Ôåô
                       </div>
                     </summary>
 
@@ -823,10 +1448,10 @@ export default function HyperliquidPage() {
                                     : 'text-slate-500 dark:text-slate-400'
                                 }`}>
                                   {position.fundingRate.currentRateApr > position.fundingRate.avgRate7dApr
-                                    ? '↑ Above average'
+                                    ? 'Ôåæ Above average'
                                     : position.fundingRate.currentRateApr < position.fundingRate.avgRate7dApr
-                                    ? '↓ Below average'
-                                    : '→ At average'}
+                                    ? 'Ôåô Below average'
+                                    : 'ÔåÆ At average'}
                                 </p>
                               </div>
                             </div>
