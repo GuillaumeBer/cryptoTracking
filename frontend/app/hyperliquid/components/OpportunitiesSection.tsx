@@ -59,6 +59,10 @@ export function OpportunitiesSection({
     return opportunities.reduce((max, item) => Math.max(max, item.opportunityScore), 0);
   }, [opportunities]);
 
+  const bestRanyScore = useMemo(() => {
+    return opportunities.reduce((max, item) => Math.max(max, item.ranyScore ?? 0), 0);
+  }, [opportunities]);
+
   const handleDirectionChange = (direction: OpportunityDirectionFilter) => {
     setFilters((previous) => (previous.direction === direction ? previous : { ...previous, direction }));
   };
@@ -277,7 +281,9 @@ export function OpportunitiesSection({
           <div className="space-y-4">
             {opportunities.map((market) => {
               const normalizedScore = bestOpportunityScore > 0 ? Math.min(market.opportunityScore / bestOpportunityScore, 1) : 0;
+              const normalizedRany = bestRanyScore > 0 ? Math.min((market.ranyScore ?? 0) / bestRanyScore, 1) : 0;
               const scoreBarWidth = `${Math.max(8, normalizedScore * 100)}%`;
+              const ranyBarWidth = `${Math.max(8, normalizedRany * 100)}%`;
               const directionBadgeClasses =
                 market.direction === 'short'
                   ? 'bg-emerald-500/90 text-white'
@@ -287,11 +293,14 @@ export function OpportunitiesSection({
                 market.fundingRateAnnualized >= 0
                   ? 'text-emerald-600 dark:text-emerald-400'
                   : 'text-rose-600 dark:text-rose-400';
+              const dualHigh = normalizedScore >= 0.75 && normalizedRany >= 0.75;
 
               return (
                 <div
                   key={market.coin}
-                  className="rounded-xl border border-slate-200/70 dark:border-slate-700/60 bg-white/80 dark:bg-slate-900/50 p-5 shadow-sm hover:shadow-md transition-all duration-200"
+                  className={`rounded-xl border border-slate-200/70 dark:border-slate-700/60 bg-white/80 dark:bg-slate-900/50 p-5 shadow-sm hover:shadow-md transition-all duration-200 ${
+                    dualHigh ? 'ring-2 ring-emerald-300/50 dark:ring-emerald-500/40 border-emerald-300/50 dark:border-emerald-600/40' : ''
+                  }`}
                 >
                   <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
                     <div className="space-y-1">
@@ -307,6 +316,11 @@ export function OpportunitiesSection({
                             Isolated only
                           </span>
                         )}
+                        {dualHigh && (
+                          <span className="text-xs font-semibold px-2 py-1 rounded-full bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300">
+                            RANY &amp; Opportunity Aligned
+                          </span>
+                        )}
                       </div>
                       <p className="text-xs text-slate-500 dark:text-slate-400">
                         Mark {formatCurrency(market.markPrice)}
@@ -320,7 +334,7 @@ export function OpportunitiesSection({
                     </span>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 text-sm">
+                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4 text-sm">
                     <div>
                       <span className="block text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">
                         Funding (Annual)
@@ -363,6 +377,20 @@ export function OpportunitiesSection({
                         Monthly {formatCurrency(market.estimatedMonthlyPnlUsd)}
                       </p>
                     </div>
+                    <div>
+                      <span className="block text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">
+                        Net Yield &amp; RANY
+                      </span>
+                      <p className="text-lg font-semibold text-slate-900 dark:text-white">
+                        {formatPercent(market.expectedNetYieldAnnualized ?? 0, 2)}
+                      </p>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Gross {formatPercent(market.expectedGrossYieldAnnualized ?? 0, 2)} · Costs {formatPercent(market.expectedTotalCostsAnnualized ?? 0, 2)}
+                      </p>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        RANY {market.ranyScore !== undefined ? formatNumber(market.ranyScore, 2) : '–'} · Risk {market.compositeRiskFactor !== undefined ? formatNumber(market.compositeRiskFactor, 2) : '–'}
+                      </p>
+                    </div>
                   </div>
 
                   <div className="mt-4">
@@ -377,6 +405,24 @@ export function OpportunitiesSection({
                       />
                     </div>
                   </div>
+
+                  {market.ranyScore !== undefined && (
+                    <div className="mt-3">
+                      <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400 mb-1">
+                        <span>RANY score</span>
+                        <span>{formatNumber(market.ranyScore, 2)}</span>
+                      </div>
+                      <div className="h-2 rounded-full bg-slate-200/70 dark:bg-slate-800 overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-gradient-to-r from-emerald-500 via-cyan-500 to-indigo-500"
+                          style={{ width: ranyBarWidth }}
+                        />
+                      </div>
+                      <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                        Market health {formatPercent(market.marketHealthScore ?? 0, 0)} · Funding σ {formatPercent(market.fundingRateVolatilityAnnualized ?? 0, 2)} · Price ATR {formatPercent(market.priceAtrPercent ?? 0, 2)}
+                      </p>
+                    </div>
+                  )}
                 </div>
               );
             })}

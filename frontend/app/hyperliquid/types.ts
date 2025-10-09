@@ -134,6 +134,21 @@ export interface HyperliquidOpportunity {
   szDecimals?: number;
   onlyIsolated?: boolean;
   marginTableId?: number;
+  historicalVolatility?: number;
+  avgFundingRate24h?: number;
+  expectedFundingRateEwma?: number;
+  expectedGrossYieldAnnualized?: number;
+  expectedTotalCostsAnnualized?: number;
+  expectedNetYieldAnnualized?: number;
+  spreadCostPercent?: number;
+  slippageCostPercent?: number;
+  feeCostPercent?: number;
+  tradesPerYear?: number;
+  fundingRateVolatilityAnnualized?: number;
+  priceAtrPercent?: number;
+  marketHealthScore?: number;
+  compositeRiskFactor?: number;
+  ranyScore?: number;
 }
 
 export interface HyperliquidOpportunityTotals {
