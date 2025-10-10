@@ -5,6 +5,7 @@ import { useClientReady } from '@/hooks/useClientReady';
 import { OpportunitiesSection } from './components/OpportunitiesSection';
 import { PerpConnectorsSection } from './components/PerpConnectorsSection';
 import { PositionsSection } from './components/PositionsSection';
+import { RecommendationSection } from './components/RecommendationSection';
 import { useHyperliquidOpportunities } from './hooks/useHyperliquidOpportunities';
 import { useHyperliquidPositions } from './hooks/useHyperliquidPositions';
 import { usePerpConnectors } from './hooks/usePerpConnectors';
@@ -89,6 +90,8 @@ export default function HyperliquidPage() {
             </p>
           </div>
         </div>
+
+        <RecommendationSection walletAddress={walletAddress} filters={opportunityFilters} />
 
         <OpportunitiesSection
           filters={opportunityFilters}

@@ -109,6 +109,573 @@ async function fetchHyperliquidInfo<T>(
   return requestPromise as Promise<T>;
 }
 
+const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
+const parseStringParam = (value: unknown, defaultValue: string): string => {
+  if (Array.isArray(value)) {
+    return value.length > 0 ? String(value[0]) : defaultValue;
+  }
+  if (value === undefined || value === null) {
+    return defaultValue;
+  }
+  const strValue = String(value).trim();
+  return strValue.length > 0 ? strValue : defaultValue;
+};
+
+const parseNumericParam = (value: unknown, defaultValue: number): number => {
+  const raw = parseStringParam(value, String(defaultValue));
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) ? parsed : defaultValue;
+};
+
+const parseOptionalNumericParam = (value: unknown): number | undefined => {
+  if (Array.isArray(value)) {
+    return value.length > 0 ? parseOptionalNumericParam(value[0]) : undefined;
+  }
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const raw = String(value).trim();
+  if (raw.length === 0) {
+    return undefined;
+  }
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+const parseNumberString = (value?: string | null): number => {
+  if (value === undefined || value === null) return 0;
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const calculateAverage = (data: number[]): number => {
+  if (data.length === 0) return 0;
+  return data.reduce((a, b) => a + b, 0) / data.length;
+};
+
+const calculateStandardDeviation = (data: number[]): number | undefined => {
+  if (data.length === 0) return undefined;
+  const mean = calculateAverage(data);
+  const variance = data.reduce((acc, value) => acc + Math.pow(value - mean, 2), 0) / data.length;
+  return Math.sqrt(variance);
+};
+
+const calculateEwma = (data: number[], alpha: number): number | undefined => {
+  if (!Array.isArray(data) || data.length === 0) return undefined;
+  let ewma = data[0];
+  for (let i = 1; i < data.length; i++) {
+    ewma = alpha * data[i] + (1 - alpha) * ewma;
+  }
+  return ewma;
+};
+
+const calculateVolatility = (klines: any[]): number | undefined => {
+  if (!klines || klines.length < 2) return undefined;
+  const closePrices = klines.map((k: any) => parseFloat(k[4]));
+
+  const returns: number[] = [];
+  for (let i = 1; i < closePrices.length; i++) {
+    if (closePrices[i - 1] !== 0) {
+      returns.push((closePrices[i] - closePrices[i - 1]) / closePrices[i - 1]);
+    }
+  }
+
+  if (returns.length === 0) return 0;
+
+  const meanReturn = calculateAverage(returns);
+  const variance = returns.reduce((acc, r) => acc + Math.pow(r - meanReturn, 2), 0) / returns.length;
+  const hourlyVolatility = Math.sqrt(variance);
+  return hourlyVolatility * Math.sqrt(24 * 365);
+};
+
+const calculateAtrPercent = (klines: any[], period = 14): number | undefined => {
+  if (!Array.isArray(klines) || klines.length < period + 1) return undefined;
+
+  const highs = klines.map((k: any) => Number.parseFloat(k[2]));
+  const lows = klines.map((k: any) => Number.parseFloat(k[3]));
+  const closes = klines.map((k: any) => Number.parseFloat(k[4]));
+
+  if (highs.some(v => !Number.isFinite(v)) || lows.some(v => !Number.isFinite(v)) || closes.some(v => !Number.isFinite(v))) {
+    return undefined;
+  }
+
+  const trueRanges: number[] = [];
+  for (let i = 1; i < klines.length; i++) {
+    const high = highs[i];
+    const low = lows[i];
+    const previousClose = closes[i - 1];
+    const trueRange = Math.max(
+      high - low,
+      Math.abs(high - previousClose),
+      Math.abs(low - previousClose),
+    );
+    trueRanges.push(trueRange);
+  }
+
+  if (trueRanges.length < period) return undefined;
+
+  const recentTr = trueRanges.slice(-period);
+  const atr = recentTr.reduce((sum, value) => sum + value, 0) / period;
+  const currentClose = closes[closes.length - 1];
+
+  if (!Number.isFinite(currentClose) || currentClose === 0) {
+    return undefined;
+  }
+
+  return atr / currentClose;
+};
+
+interface OpportunityScoreInput {
+  fundingRateAnnualized: number;
+  openInterestUsd: number;
+  dayNotionalVolumeUsd: number;
+  stabilityAdjustment?: number;
+  tradingCostDaily: number;
+}
+
+const computeOpportunityScores = ({
+  fundingRateAnnualized,
+  openInterestUsd,
+  dayNotionalVolumeUsd,
+  stabilityAdjustment,
+  tradingCostDaily,
+}: OpportunityScoreInput) => {
+  const liquidityScore = Math.min(1, openInterestUsd / 5_000_000);
+  const volumeScore = Math.min(1, dayNotionalVolumeUsd / 2_000_000);
+
+  const feasibilityWeight = 0.6 + 0.3 * liquidityScore + 0.1 * volumeScore;
+
+  const costAnnualized = Math.max(tradingCostDaily, 0) * 365;
+  const fundingStrength = Math.max(Math.abs(fundingRateAnnualized) - costAnnualized, 0);
+
+  const boundedStability = (() => {
+    if (stabilityAdjustment === undefined) return 1;
+    if (!Number.isFinite(stabilityAdjustment)) return 1;
+    return Math.min(Math.max(stabilityAdjustment, 0.25), 1);
+  })();
+
+  const opportunityScore = fundingStrength * boundedStability * feasibilityWeight;
+
+  return {
+    liquidityScore,
+    volumeScore,
+    opportunityScore,
+    fundingStrength,
+    stabilityAdjustment: boundedStability,
+    feasibilityWeight,
+  };
+};
+
+const EWMA_LOOKBACK_PERIOD = 24;
+const EWMA_ALPHA = 2 / (EWMA_LOOKBACK_PERIOD + 1);
+const DEFAULT_AVERAGE_HOLDING_PERIOD_DAYS = 3;
+const DEFAULT_MARKET_IMPACT_FACTOR = 0.25;
+const DEFAULT_TAKER_FEE_RATE = 0.0005; // 5 bps per taker fill
+const RISK_WEIGHT_FUNDING = 0.6;
+const RISK_WEIGHT_PRICE = 0.4;
+const MIN_MARKET_HEALTH = 0.05;
+const BLENDED_SCORE_WEIGHTS = { opportunity: 0.6, rany: 0.4 } as const;
+
+type OpportunityDirection = 'short' | 'long' | 'all';
+type OpportunitySort = 'score' | 'funding' | 'liquidity' | 'volume';
+
+interface HyperliquidOpportunityOptions {
+  minOpenInterestUsd: number;
+  minVolumeUsd: number;
+  notionalUsd: number;
+  tradingCostDaily: number;
+  direction: OpportunityDirection;
+  sort: OpportunitySort;
+}
+
+interface HyperliquidOpportunityComputationResult {
+  markets: HyperliquidOpportunity[];
+  filteredMarkets: HyperliquidOpportunity[];
+  sortedMarkets: HyperliquidOpportunity[];
+  totals: {
+    availableMarkets: number;
+    filteredMarkets: number;
+    averageFundingAnnualized: number;
+    averageAbsoluteFundingAnnualized: number;
+  };
+}
+
+async function computeHyperliquidOpportunities({
+  minOpenInterestUsd,
+  minVolumeUsd,
+  notionalUsd: baselineNotionalUsd,
+  tradingCostDaily,
+  direction,
+  sort,
+}: HyperliquidOpportunityOptions): Promise<HyperliquidOpportunityComputationResult> {
+  const directionFilter = direction;
+  const sortKey = sort;
+
+  const twentyFourHoursAgo = Date.now() - (24 * 60 * 60 * 1000);
+  const payload = await fetchHyperliquidInfo<HyperliquidMetaAndAssetCtxs>({
+    type: 'metaAndAssetCtxs',
+  }, { ttlMs: 5_000 });
+  if (!Array.isArray(payload) || payload.length < 2) {
+    throw new Error('Unexpected Hyperliquid meta payload structure');
+  }
+
+  const [metaInfo, assetCtxs] = payload;
+  const universe = Array.isArray(metaInfo?.universe) ? metaInfo.universe : [];
+  if (!Array.isArray(assetCtxs)) {
+    throw new Error('Missing asset contexts in Hyperliquid payload');
+  }
+
+  const fundingHistories: { [coin: string]: HyperliquidFundingHistoryItem[] } = {};
+  const klinesData: { [coin: string]: any[] } = {};
+
+  const MAX_FUNDING_HISTORY_COINS = 40;
+
+  const byOpenInterest = universe
+    .map((asset, index) => {
+      const ctx = assetCtxs[index];
+      const openInterestBase = parseNumberString(ctx?.openInterest);
+      const referencePrice = parseNumberString(ctx?.markPx ?? ctx?.oraclePx ?? ctx?.midPx ?? undefined);
+      return {
+        coin: asset.name,
+        openInterestUsd: openInterestBase * referencePrice,
+      };
+    })
+    .filter(item => Number.isFinite(item.openInterestUsd) && item.openInterestUsd > 0)
+    .sort((a, b) => b.openInterestUsd - a.openInterestUsd);
+
+  const byVolume = universe
+    .map((asset, index) => {
+      const ctx = assetCtxs[index];
+      const dayNotionalVolumeUsd = parseNumberString(ctx?.dayNtlVlm);
+      return {
+        coin: asset.name,
+        dayNotionalVolumeUsd,
+      };
+    })
+    .filter(item => Number.isFinite(item.dayNotionalVolumeUsd) && item.dayNotionalVolumeUsd > 0)
+    .sort((a, b) => b.dayNotionalVolumeUsd - a.dayNotionalVolumeUsd);
+
+  const coinsForHistory = new Set<string>();
+  const includeCoin = (coin: string) => {
+    if (!coinsForHistory.has(coin) && coinsForHistory.size < MAX_FUNDING_HISTORY_COINS) {
+      coinsForHistory.add(coin);
+    }
+  };
+
+  byOpenInterest.forEach(({ coin }) => includeCoin(coin));
+  if (coinsForHistory.size < MAX_FUNDING_HISTORY_COINS) {
+    byVolume.forEach(({ coin }) => includeCoin(coin));
+  }
+
+  const dataFetchPromises = universe.map(async (asset) => {
+    const coin = asset.name;
+    if (asset.isDelisted) return;
+    if (!coinsForHistory.has(coin)) return;
+
+    const fundingPromise = fetchHyperliquidInfo<HyperliquidFundingHistoryItem[]>({
+      type: 'fundingHistory',
+      coin,
+      startTime: twentyFourHoursAgo,
+    }, { ttlMs: 10 * 60 * 1000 })
+      .catch((error) => {
+        console.error(`Error fetching funding history for ${coin} (opportunities):`, error);
+        return [] as HyperliquidFundingHistoryItem[];
+      });
+
+    const binanceSymbol = `${coin.toUpperCase()}USDT`;
+    const klinesPromise = binanceService.getKlines(binanceSymbol, '1h', 24)
+      .catch((error: unknown) => {
+        console.error(`Error fetching Binance klines for ${coin}:`, error);
+        return [] as any[];
+      });
+
+    const [fundingResult, klinesResult] = await Promise.all([
+      fundingPromise,
+      klinesPromise,
+    ]);
+
+    if (Array.isArray(fundingResult) && fundingResult.length > 0) {
+      fundingHistories[coin] = fundingResult;
+    }
+    if (Array.isArray(klinesResult) && klinesResult.length > 0) {
+      klinesData[coin] = klinesResult;
+    }
+  });
+
+  await Promise.all(dataFetchPromises);
+  console.log(`✅ Fetched historical data: ${Object.keys(fundingHistories).length} funding histories, ${Object.keys(klinesData).length} kline series.`);
+
+  const markets: HyperliquidOpportunity[] = universe
+    .map((asset, index) => {
+      const ctx = assetCtxs[index];
+      if (!ctx) return null;
+      if (asset.isDelisted) return null;
+
+      const markPrice = parseNumberString(ctx.markPx ?? ctx.oraclePx);
+      const oraclePrice = ctx.oraclePx !== undefined ? parseNumberString(ctx.oraclePx) : null;
+      const effectivePrice = markPrice > 0 ? markPrice : oraclePrice ?? 0;
+      if (effectivePrice <= 0) return null;
+
+      const openInterestBase = parseNumberString(ctx.openInterest);
+      const openInterestUsd = openInterestBase * effectivePrice;
+      const dayNotionalVolumeUsd = parseNumberString(ctx.dayNtlVlm);
+      const dayBaseVolume = parseNumberString(ctx.dayBaseVlm);
+      const fundingRateHourly = parseNumberString(ctx.funding);
+      const fundingRateDaily = fundingRateHourly * 24;
+      const fundingRateAnnualized = fundingRateHourly * 24 * 365;
+      const premium =
+        ctx.premium === null || ctx.premium === undefined ? null : parseNumberString(ctx.premium);
+
+      const historicalVolatility = calculateVolatility(klinesData[asset.name]);
+      const atrPercent = calculateAtrPercent(klinesData[asset.name]);
+
+      const fundingHistory = fundingHistories[asset.name] ?? [];
+      const fundingRates24h = fundingHistory
+        .filter((item) => item.time >= twentyFourHoursAgo)
+        .map((item) => parseNumberString(item.fundingRate));
+
+      const avgFundingRate24h = fundingRates24h.length > 0 ? calculateAverage(fundingRates24h) : undefined;
+      const fundingRateStdDev = fundingRates24h.length > 0 ? calculateStandardDeviation(fundingRates24h) : undefined;
+      const fundingRateStdDevAnnualized = fundingRateStdDev !== undefined ? fundingRateStdDev * Math.sqrt(24 * 365) : undefined;
+
+      const ewmaRates = fundingRates24h.slice(-EWMA_LOOKBACK_PERIOD);
+      const expectedFundingRateEwma = ewmaRates.length > 0 ? calculateEwma(ewmaRates, EWMA_ALPHA) : undefined;
+
+      const stabilityAdjustment = (() => {
+        if (historicalVolatility === undefined || fundingRateStdDevAnnualized === undefined) return undefined;
+        const normalizedFundingVol = Math.min(fundingRateStdDevAnnualized / 1.0, 2);
+        const normalizedPriceVol = Math.min(historicalVolatility / 2.5, 2);
+        const composite = 1 - 0.5 * normalizedFundingVol - 0.5 * normalizedPriceVol;
+        return Math.max(Math.min(composite, 1), 0.25);
+      })();
+
+      const {
+        liquidityScore,
+        volumeScore,
+        opportunityScore,
+        fundingStrength,
+        stabilityAdjustment: normalizedStability,
+        feasibilityWeight,
+      } = computeOpportunityScores({
+        fundingRateAnnualized,
+        openInterestUsd,
+        dayNotionalVolumeUsd,
+        stabilityAdjustment,
+        tradingCostDaily,
+      });
+
+      const impactValues = Array.isArray(ctx.impactPxs)
+        ? ctx.impactPxs
+            .map(value => parseNumberString(typeof value === 'string' ? value : String(value)))
+            .filter(value => Number.isFinite(value) && value > 0)
+        : [];
+
+      let bidPx = impactValues.length >= 2 ? Math.min(impactValues[0], impactValues[1]) : undefined;
+      let askPx = impactValues.length >= 2 ? Math.max(impactValues[0], impactValues[1]) : undefined;
+
+      const spreadCostPercent = (() => {
+        const reference = effectivePrice;
+        if (Number.isFinite(bidPx) && Number.isFinite(askPx) && reference > 0) {
+          const spread = Math.max((askPx ?? 0) - (bidPx ?? 0), 0);
+          return reference > 0 ? spread / reference : 0;
+        }
+
+        if (reference > 0) {
+          const fallbackSpread = reference * 0.0005;
+          bidPx = reference - fallbackSpread / 2;
+          askPx = reference + fallbackSpread / 2;
+          return fallbackSpread / reference;
+        }
+
+        return 0.0005;
+      })();
+
+      const DEFAULT_DEPTH_USD = 2_000_000;
+      const notionalUsd = Math.max(
+        baselineNotionalUsd,
+        Math.max(
+          10_000,
+          Math.min(openInterestUsd * 0.02, dayNotionalVolumeUsd * 0.02, DEFAULT_DEPTH_USD * 0.25),
+        ),
+      );
+
+      const estimatedHourlyDepthUsd = dayNotionalVolumeUsd > 0 ? dayNotionalVolumeUsd / 24 : 0;
+      const slippageCostPercent = estimatedHourlyDepthUsd > 0
+        ? Math.min((notionalUsd / estimatedHourlyDepthUsd) * DEFAULT_MARKET_IMPACT_FACTOR, 0.05)
+        : 0.01;
+      const feeCostPercent = DEFAULT_TAKER_FEE_RATE * 2;
+      const tradesPerYear = 365 / DEFAULT_AVERAGE_HOLDING_PERIOD_DAYS;
+
+      const effectiveExpectedFundingRate = expectedFundingRateEwma ?? fundingRateHourly;
+      const expectedFundingRateDirectional = fundingRateHourly >= 0
+        ? Math.max(effectiveExpectedFundingRate, 0)
+        : Math.max(-effectiveExpectedFundingRate, 0);
+      const expectedGrossYieldAnnualized = expectedFundingRateDirectional * 24 * 365;
+      const expectedTotalCostsAnnualized = tradesPerYear * (spreadCostPercent * 2 + slippageCostPercent * 2 + feeCostPercent);
+      const expectedNetYieldAnnualized = expectedGrossYieldAnnualized - expectedTotalCostsAnnualized;
+
+      const fundingRateVolatilityAnnualized = fundingRateStdDevAnnualized;
+      const priceAtrPercent = atrPercent;
+
+      const direction: 'short' | 'long' = fundingRateHourly >= 0 ? 'short' : 'long';
+      const estimatedDailyPnlUsd = notionalUsd * fundingRateDaily;
+      const estimatedMonthlyPnlUsd = estimatedDailyPnlUsd * 30;
+
+      return {
+        coin: asset.name,
+        markPrice: effectivePrice,
+        oraclePrice,
+        fundingRateHourly,
+        fundingRateDaily,
+        fundingRateAnnualized,
+        openInterestBase,
+        openInterestUsd,
+        dayNotionalVolumeUsd,
+        dayBaseVolume: dayBaseVolume > 0 ? dayBaseVolume : undefined,
+        premium,
+        direction,
+        opportunityScore,
+        liquidityScore,
+        volumeScore,
+        fundingStrength,
+        stabilityAdjustment: normalizedStability,
+        feasibilityWeight,
+        fundingRateStdDevAnnualized,
+        historicalVolatility,
+        avgFundingRate24h,
+        expectedFundingRateEwma,
+        expectedGrossYieldAnnualized,
+        expectedTotalCostsAnnualized,
+        expectedNetYieldAnnualized,
+        spreadCostPercent,
+        slippageCostPercent,
+        feeCostPercent,
+        tradesPerYear,
+        fundingRateVolatilityAnnualized,
+        priceAtrPercent,
+        expectedDailyReturnPercent: fundingRateDaily,
+        estimatedDailyPnlUsd,
+        estimatedMonthlyPnlUsd,
+        notionalUsd,
+        maxLeverage: asset.maxLeverage,
+        szDecimals: asset.szDecimals,
+        onlyIsolated: asset.onlyIsolated,
+        marginTableId: asset.marginTableId,
+      } as HyperliquidOpportunity;
+    })
+    .filter((market): market is HyperliquidOpportunity => market !== null);
+
+  const maxOpenInterestUsd = markets.reduce((max, market) => Math.max(max, market.openInterestUsd ?? 0), 0);
+  const maxVolumeUsd = markets.reduce((max, market) => Math.max(max, market.dayNotionalVolumeUsd ?? 0), 0);
+  const maxDepthEstimate = markets.reduce((max, market) => {
+    const depth = market.dayNotionalVolumeUsd > 0 ? market.dayNotionalVolumeUsd / 24 : 0;
+    return Math.max(max, depth);
+  }, 0);
+
+  const depthWeights = { oi: 0.4, volume: 0.3, depth: 0.3 } as const;
+
+  markets.forEach((market) => {
+    const oiScore = maxOpenInterestUsd > 0 ? Math.min(market.openInterestUsd / maxOpenInterestUsd, 1) : 0;
+    const volumeScoreNormalized = maxVolumeUsd > 0 ? Math.min(market.dayNotionalVolumeUsd / maxVolumeUsd, 1) : 0;
+    const depthEstimate = market.dayNotionalVolumeUsd > 0 ? market.dayNotionalVolumeUsd / 24 : 0;
+    const depthNormalized = maxDepthEstimate > 0 ? Math.min(depthEstimate / maxDepthEstimate, 1) : 0;
+    const spreadScore = market.spreadCostPercent !== undefined
+      ? Math.max(0, 1 - (market.spreadCostPercent / 0.005))
+      : 0.5;
+    const depthComposite = Math.min(1, depthNormalized * 0.7 + spreadScore * 0.3);
+    const marketHealthScore = Math.max(0, Math.min(1, (
+      depthWeights.oi * oiScore +
+      depthWeights.volume * volumeScoreNormalized +
+      depthWeights.depth * depthComposite
+    )));
+
+    const fundingVol = market.fundingRateVolatilityAnnualized ?? 0;
+    const priceVol = market.priceAtrPercent ?? 0;
+    const combinedVolatility = Math.sqrt(
+      RISK_WEIGHT_FUNDING * Math.pow(fundingVol, 2) +
+      RISK_WEIGHT_PRICE * Math.pow(priceVol, 2),
+    );
+    const healthForRisk = Math.max(marketHealthScore, MIN_MARKET_HEALTH);
+    const compositeRiskFactor = healthForRisk > 0 ? combinedVolatility / healthForRisk : undefined;
+    const expectedNetYield = market.expectedNetYieldAnnualized ?? 0;
+    const ranyScore = compositeRiskFactor && compositeRiskFactor > 0 ? expectedNetYield / compositeRiskFactor : undefined;
+
+    market.marketHealthScore = marketHealthScore;
+    market.compositeRiskFactor = compositeRiskFactor;
+    market.ranyScore = ranyScore;
+  });
+
+  const maxOpportunityScore = markets.reduce((max, market) => Math.max(max, Math.max(market.opportunityScore, 0)), 0);
+  const maxRanyScore = markets.reduce((max, market) => Math.max(max, Math.max(market.ranyScore ?? 0, 0)), 0);
+
+  markets.forEach((market) => {
+    const normalizedOpportunity = maxOpportunityScore > 0
+      ? Math.max(market.opportunityScore, 0) / maxOpportunityScore
+      : 0;
+    const normalizedRany = maxRanyScore > 0 && market.ranyScore !== undefined
+      ? Math.max(market.ranyScore, 0) / maxRanyScore
+      : 0;
+
+    market.combinedScore = (
+      normalizedOpportunity * BLENDED_SCORE_WEIGHTS.opportunity +
+      normalizedRany * BLENDED_SCORE_WEIGHTS.rany
+    );
+  });
+
+  const filteredMarkets = markets.filter((market) => {
+    if (directionFilter !== 'all' && market.direction !== directionFilter) {
+      return false;
+    }
+    if (market.openInterestUsd < minOpenInterestUsd) {
+      return false;
+    }
+    if (market.dayNotionalVolumeUsd < minVolumeUsd) {
+      return false;
+    }
+    return true;
+  });
+
+  const sortedMarkets = [...filteredMarkets].sort((a, b) => {
+    switch (sortKey) {
+      case 'funding':
+        return Math.abs(b.fundingRateAnnualized) - Math.abs(a.fundingRateAnnualized);
+      case 'liquidity':
+        return b.openInterestUsd - a.openInterestUsd;
+      case 'volume':
+        return b.dayNotionalVolumeUsd - a.dayNotionalVolumeUsd;
+      case 'score':
+      default: {
+        const aScore = a.combinedScore ?? a.opportunityScore;
+        const bScore = b.combinedScore ?? b.opportunityScore;
+        return bScore - aScore;
+      }
+    }
+  });
+
+  const averageFundingAnnualized =
+    filteredMarkets.length > 0
+      ? filteredMarkets.reduce((sum, market) => sum + market.fundingRateAnnualized, 0) / filteredMarkets.length
+      : 0;
+
+  const averageAbsoluteFundingAnnualized =
+    filteredMarkets.length > 0
+      ? filteredMarkets.reduce((sum, market) => sum + Math.abs(market.fundingRateAnnualized), 0) / filteredMarkets.length
+      : 0;
+
+  return {
+    markets,
+    filteredMarkets,
+    sortedMarkets,
+    totals: {
+      availableMarkets: markets.length,
+      filteredMarkets: filteredMarkets.length,
+      averageFundingAnnualized,
+      averageAbsoluteFundingAnnualized,
+    },
+  };
+}
+
 interface DeltaNeutralAction {
   action: 'buy' | 'sell' | 'increase_short' | 'decrease_short';
   amount: number;
@@ -831,25 +1398,6 @@ router.get('/', async (req: Request, res: Response) => {
 });
 
 router.get('/opportunities', async (req: Request, res: Response) => {
-  const parseStringParam = (value: unknown, defaultValue: string): string => {
-    if (Array.isArray(value)) {
-      return value.length > 0 ? String(value[0]) : defaultValue;
-    }
-    if (value === undefined || value === null) {
-      return defaultValue;
-    }
-    const strValue = String(value).trim();
-    return strValue.length > 0 ? strValue : defaultValue;
-  };
-
-  const parseNumericParam = (value: unknown, defaultValue: number): number => {
-    const raw = parseStringParam(value, String(defaultValue));
-    const parsed = Number.parseFloat(raw);
-    return Number.isFinite(parsed) ? parsed : defaultValue;
-  };
-
-  const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
-
   const limit = clamp(Math.round(parseNumericParam(req.query.limit, 15)), 1, 100);
   const minOpenInterestUsd = Math.max(0, parseNumericParam(req.query.minOpenInterestUsd, 3_000_000));
   const minVolumeUsd = Math.max(0, parseNumericParam(req.query.minVolumeUsd, 1_000_000));
@@ -859,508 +1407,25 @@ router.get('/opportunities', async (req: Request, res: Response) => {
   const directionParam = parseStringParam(req.query.direction, 'short').toLowerCase();
   const sortParam = parseStringParam(req.query.sort, 'score').toLowerCase();
 
-  const directionFilter: 'short' | 'long' | 'all' =
+  const directionFilter: OpportunityDirection =
     directionParam === 'long' ? 'long' : directionParam === 'all' ? 'all' : 'short';
 
-  const allowedSorts = new Set(['score', 'funding', 'liquidity', 'volume']);
-  const sortKey: 'score' | 'funding' | 'liquidity' | 'volume' = allowedSorts.has(sortParam)
-    ? (sortParam as 'score' | 'funding' | 'liquidity' | 'volume')
+  const allowedSorts: OpportunitySort[] = ['score', 'funding', 'liquidity', 'volume'];
+  const sortKey: OpportunitySort = allowedSorts.includes(sortParam as OpportunitySort)
+    ? (sortParam as OpportunitySort)
     : 'score';
 
-  const parseNumber = (value?: string | null): number => {
-    if (value === undefined || value === null) return 0;
-    const parsed = Number.parseFloat(value);
-    return Number.isFinite(parsed) ? parsed : 0;
-  };
-
-  const calculateAverage = (data: number[]): number => {
-    if (data.length === 0) return 0;
-    return data.reduce((a, b) => a + b, 0) / data.length;
-  };
-
-  const calculateStandardDeviation = (data: number[]): number | undefined => {
-    if (data.length === 0) return undefined;
-    const mean = calculateAverage(data);
-    const variance = data.reduce((acc, value) => acc + Math.pow(value - mean, 2), 0) / data.length;
-    return Math.sqrt(variance);
-  };
-
-  const calculateEwma = (data: number[], alpha: number): number | undefined => {
-    if (!Array.isArray(data) || data.length === 0) return undefined;
-    let ewma = data[0];
-    for (let i = 1; i < data.length; i++) {
-      ewma = alpha * data[i] + (1 - alpha) * ewma;
-    }
-    return ewma;
-  };
-
-  const calculateVolatility = (klines: any[]): number | undefined => {
-    if (!klines || klines.length < 2) return undefined;
-    const closePrices = klines.map(k => parseFloat(k[4])); // Index 4 is close price
-
-    const returns = [];
-    for (let i = 1; i < closePrices.length; i++) {
-      if (closePrices[i - 1] !== 0) {
-        returns.push((closePrices[i] - closePrices[i - 1]) / closePrices[i - 1]);
-      }
-    }
-
-    if (returns.length === 0) return 0;
-
-    const meanReturn = calculateAverage(returns);
-    const variance = returns.reduce((acc, r) => acc + Math.pow(r - meanReturn, 2), 0) / returns.length;
-    const hourlyVolatility = Math.sqrt(variance);
-    // Return annualized volatility from hourly data
-    return hourlyVolatility * Math.sqrt(24 * 365);
-  };
-
-  const calculateAtrPercent = (klines: any[], period = 14): number | undefined => {
-    if (!Array.isArray(klines) || klines.length < period + 1) return undefined;
-
-    const highs = klines.map(k => Number.parseFloat(k[2]));
-    const lows = klines.map(k => Number.parseFloat(k[3]));
-    const closes = klines.map(k => Number.parseFloat(k[4]));
-
-    if (highs.some(v => !Number.isFinite(v)) || lows.some(v => !Number.isFinite(v)) || closes.some(v => !Number.isFinite(v))) {
-      return undefined;
-    }
-
-    const trueRanges: number[] = [];
-    for (let i = 1; i < klines.length; i++) {
-      const high = highs[i];
-      const low = lows[i];
-      const previousClose = closes[i - 1];
-      const trueRange = Math.max(
-        high - low,
-        Math.abs(high - previousClose),
-        Math.abs(low - previousClose),
-      );
-      trueRanges.push(trueRange);
-    }
-
-    if (trueRanges.length < period) return undefined;
-
-    const recentTr = trueRanges.slice(-period);
-    const atr = recentTr.reduce((sum, value) => sum + value, 0) / period;
-    const currentClose = closes[closes.length - 1];
-
-    if (!Number.isFinite(currentClose) || currentClose === 0) {
-      return undefined;
-    }
-
-    return atr / currentClose;
-  };
-
-  const computeScores = ({
-    fundingRateAnnualized,
-    openInterestUsd,
-    dayNotionalVolumeUsd,
-    stabilityAdjustment,
-    tradingCostDaily,
-  }: {
-    fundingRateAnnualized: number;
-    openInterestUsd: number;
-    dayNotionalVolumeUsd: number;
-    stabilityAdjustment?: number;
-    tradingCostDaily: number;
-  }) => {
-    const liquidityScore = Math.min(1, openInterestUsd / 5_000_000);
-    const volumeScore = Math.min(1, dayNotionalVolumeUsd / 2_000_000);
-
-    const feasibilityWeight = 0.6 + 0.3 * liquidityScore + 0.1 * volumeScore;
-
-    const costAnnualized = Math.max(tradingCostDaily, 0) * 365;
-    const fundingStrength = Math.max(Math.abs(fundingRateAnnualized) - costAnnualized, 0);
-
-    const boundedStability = (() => {
-      if (stabilityAdjustment === undefined) return 1;
-      if (!Number.isFinite(stabilityAdjustment)) return 1;
-      return Math.min(Math.max(stabilityAdjustment, 0.25), 1);
-    })();
-
-    const opportunityScore = fundingStrength * boundedStability * feasibilityWeight;
-
-    return {
-      liquidityScore,
-      volumeScore,
-      opportunityScore,
-      fundingStrength,
-      stabilityAdjustment: boundedStability,
-      feasibilityWeight,
-    };
-  };
-
-  const EWMA_LOOKBACK_PERIOD = 24;
-  const EWMA_ALPHA = 2 / (EWMA_LOOKBACK_PERIOD + 1);
-  const DEFAULT_AVERAGE_HOLDING_PERIOD_DAYS = 3;
-  const DEFAULT_MARKET_IMPACT_FACTOR = 0.25;
-  const DEFAULT_TAKER_FEE_RATE = 0.0005; // 5 bps per taker fill
-  const RISK_WEIGHT_FUNDING = 0.6;
-  const RISK_WEIGHT_PRICE = 0.4;
-  const MIN_MARKET_HEALTH = 0.05;
-  const BLENDED_SCORE_WEIGHTS = { opportunity: 0.6, rany: 0.4 } as const;
-
   try {
-    // Fetch historical funding and volatility data in parallel
-    const twentyFourHoursAgo = Date.now() - (24 * 60 * 60 * 1000);
-    const payload = await fetchHyperliquidInfo<HyperliquidMetaAndAssetCtxs>({
-      type: 'metaAndAssetCtxs',
-    }, { ttlMs: 5_000 });
-    if (!Array.isArray(payload) || payload.length < 2) {
-      throw new Error('Unexpected Hyperliquid meta payload structure');
-    }
-
-    const [metaInfo, assetCtxs] = payload;
-    const universe = Array.isArray(metaInfo?.universe) ? metaInfo.universe : [];
-    if (!Array.isArray(assetCtxs)) {
-      throw new Error('Missing asset contexts in Hyperliquid payload');
-    }
-
-    const fundingHistories: { [coin: string]: HyperliquidFundingHistoryItem[] } = {};
-    const klinesData: { [coin: string]: any[] } = {};
-
-    const MAX_FUNDING_HISTORY_COINS = 40;
-
-    const byOpenInterest = universe
-      .map((asset, index) => {
-        const ctx = assetCtxs[index];
-        const openInterestBase = parseNumber(ctx?.openInterest);
-        const referencePrice = parseNumber(ctx?.markPx ?? ctx?.oraclePx ?? ctx?.midPx ?? undefined);
-        return {
-          coin: asset.name,
-          openInterestUsd: openInterestBase * referencePrice,
-        };
-      })
-      .filter(item => Number.isFinite(item.openInterestUsd) && item.openInterestUsd > 0)
-      .sort((a, b) => b.openInterestUsd - a.openInterestUsd);
-
-    const byVolume = universe
-      .map((asset, index) => {
-        const ctx = assetCtxs[index];
-        const dayNotionalVolumeUsd = parseNumber(ctx?.dayNtlVlm);
-        return {
-          coin: asset.name,
-          dayNotionalVolumeUsd,
-        };
-      })
-      .filter(item => Number.isFinite(item.dayNotionalVolumeUsd) && item.dayNotionalVolumeUsd > 0)
-      .sort((a, b) => b.dayNotionalVolumeUsd - a.dayNotionalVolumeUsd);
-
-    const coinsForHistory = new Set<string>();
-    const includeCoin = (coin: string) => {
-      if (!coinsForHistory.has(coin) && coinsForHistory.size < MAX_FUNDING_HISTORY_COINS) {
-        coinsForHistory.add(coin);
-      }
-    };
-
-    byOpenInterest.forEach(({ coin }) => includeCoin(coin));
-    if (coinsForHistory.size < MAX_FUNDING_HISTORY_COINS) {
-      byVolume.forEach(({ coin }) => includeCoin(coin));
-    }
-
-    const dataFetchPromises = universe.map(async (asset) => {
-      const coin = asset.name;
-      if (asset.isDelisted) return;
-      if (!coinsForHistory.has(coin)) return;
-
-      const fundingPromise = fetchHyperliquidInfo<HyperliquidFundingHistoryItem[]>({
-        type: 'fundingHistory',
-        coin,
-        startTime: twentyFourHoursAgo,
-      }, { ttlMs: 10 * 60 * 1000 })
-        .catch((error) => {
-          console.error(`Error fetching funding history for ${coin} (opportunities):`, error);
-          return [] as HyperliquidFundingHistoryItem[];
-        });
-
-      const binanceSymbol = `${coin.toUpperCase()}USDT`;
-      const klinesPromise = binanceService.getKlines(binanceSymbol, '1h', 24)
-        .catch((error: unknown) => {
-          console.error(`Error fetching Binance klines for ${coin}:`, error);
-          return [] as any[];
-        });
-
-      const [fundingResult, klinesResult] = await Promise.all([
-        fundingPromise,
-        klinesPromise,
-      ]);
-
-      if (Array.isArray(fundingResult) && fundingResult.length > 0) {
-        fundingHistories[coin] = fundingResult;
-      }
-      if (Array.isArray(klinesResult) && klinesResult.length > 0) {
-        klinesData[coin] = klinesResult;
-      }
+    const result = await computeHyperliquidOpportunities({
+      minOpenInterestUsd,
+      minVolumeUsd,
+      notionalUsd,
+      tradingCostDaily,
+      direction: directionFilter,
+      sort: sortKey,
     });
 
-    await Promise.all(dataFetchPromises);
-    console.log(`✅ Fetched historical data: ${Object.keys(fundingHistories).length} funding histories, ${Object.keys(klinesData).length} kline series.`);
-
-    const markets: HyperliquidOpportunity[] = universe
-      .map((asset, index) => {
-        const ctx = assetCtxs[index];
-        if (!ctx) return null;
-        if (asset.isDelisted) return null;
-
-        const markPrice = parseNumber(ctx.markPx ?? ctx.oraclePx);
-        const oraclePrice = ctx.oraclePx !== undefined ? parseNumber(ctx.oraclePx) : null;
-        const effectivePrice = markPrice > 0 ? markPrice : oraclePrice ?? 0;
-        if (effectivePrice <= 0) return null;
-
-        const openInterestBase = parseNumber(ctx.openInterest);
-        const openInterestUsd = openInterestBase * effectivePrice;
-        const dayNotionalVolumeUsd = parseNumber(ctx.dayNtlVlm);
-        const dayBaseVolume = parseNumber(ctx.dayBaseVlm);
-        const fundingRateHourly = parseNumber(ctx.funding);
-        const fundingRateDaily = fundingRateHourly * 24;
-        const fundingRateAnnualized = fundingRateHourly * 24 * 365;
-        const premium =
-          ctx.premium === null || ctx.premium === undefined ? null : parseNumber(ctx.premium);
-
-        const historicalVolatility = calculateVolatility(klinesData[asset.name]);
-        const atrPercent = calculateAtrPercent(klinesData[asset.name]);
-
-        const fundingHistory = fundingHistories[asset.name];
-        const sortedFundingHistory = Array.isArray(fundingHistory)
-          ? [...fundingHistory].sort((a, b) => a.time - b.time)
-          : undefined;
-        const fundingRatesHourly = sortedFundingHistory
-          ?.map(h => parseNumber(h.fundingRate))
-          .filter(rate => Number.isFinite(rate));
-
-        const averageFundingHourly = fundingRatesHourly && fundingRatesHourly.length > 0
-          ? calculateAverage(fundingRatesHourly)
-          : undefined;
-
-        const stdFundingHourly = fundingRatesHourly && fundingRatesHourly.length > 1
-          ? calculateStandardDeviation(fundingRatesHourly)
-          : undefined;
-
-        const ewmaSource = fundingRatesHourly && fundingRatesHourly.length > 0
-          ? fundingRatesHourly.slice(-Math.max(EWMA_LOOKBACK_PERIOD, 1))
-          : undefined;
-        const expectedFundingRateEwma = ewmaSource ? calculateEwma(ewmaSource, EWMA_ALPHA) : undefined;
-
-        const avgFundingRate24h = averageFundingHourly !== undefined ? averageFundingHourly * 24 * 365 : undefined;
-        const fundingRateStdDevAnnualized = stdFundingHourly !== undefined
-          ? stdFundingHourly * Math.sqrt(24 * 365)
-          : undefined;
-
-        const stabilityAdjustment = (() => {
-          if (averageFundingHourly === undefined || stdFundingHourly === undefined) {
-            return undefined;
-          }
-          const magnitude = Math.max(Math.abs(averageFundingHourly), 1e-6);
-          const coefficientOfVariation = stdFundingHourly / magnitude;
-          const capped = Math.min(coefficientOfVariation, 5);
-          return 1 / (1 + capped);
-        })();
-
-        const {
-          liquidityScore,
-          volumeScore,
-          opportunityScore,
-          fundingStrength,
-          stabilityAdjustment: normalizedStability,
-          feasibilityWeight,
-        } = computeScores({
-          fundingRateAnnualized: avgFundingRate24h ?? fundingRateAnnualized,
-          openInterestUsd,
-          dayNotionalVolumeUsd,
-          stabilityAdjustment,
-          tradingCostDaily,
-        });
-
-        const impactValues = Array.isArray(ctx.impactPxs)
-          ? ctx.impactPxs
-              .map(value => parseNumber(value))
-              .filter(value => Number.isFinite(value) && value > 0)
-          : [];
-
-        let bidPx = impactValues.length >= 2 ? Math.min(impactValues[0], impactValues[1]) : undefined;
-        let askPx = impactValues.length >= 2 ? Math.max(impactValues[0], impactValues[1]) : undefined;
-
-        const spreadCostPercent = (() => {
-          const reference = effectivePrice;
-          if (Number.isFinite(bidPx) && Number.isFinite(askPx) && reference > 0) {
-            const spread = Math.max((askPx ?? 0) - (bidPx ?? 0), 0);
-            return reference > 0 ? spread / reference : 0;
-          }
-
-          if (reference > 0) {
-            const fallbackSpread = reference * 0.0005; // 5 bps fall-back spread
-            bidPx = reference - fallbackSpread / 2;
-            askPx = reference + fallbackSpread / 2;
-            return fallbackSpread / reference;
-          }
-
-          return 0.0005;
-        })();
-
-        const estimatedHourlyDepthUsd = dayNotionalVolumeUsd > 0 ? dayNotionalVolumeUsd / 24 : 0;
-        const slippageCostPercent = estimatedHourlyDepthUsd > 0
-          ? Math.min((notionalUsd / estimatedHourlyDepthUsd) * DEFAULT_MARKET_IMPACT_FACTOR, 0.05)
-          : 0.01;
-        const feeCostPercent = DEFAULT_TAKER_FEE_RATE * 2;
-        const tradesPerYear = 365 / DEFAULT_AVERAGE_HOLDING_PERIOD_DAYS;
-
-        const effectiveExpectedFundingRate = expectedFundingRateEwma ?? fundingRateHourly;
-        const expectedFundingRateDirectional = fundingRateHourly >= 0
-          ? Math.max(effectiveExpectedFundingRate, 0)
-          : Math.max(-effectiveExpectedFundingRate, 0);
-        const expectedGrossYieldAnnualized = expectedFundingRateDirectional * 24 * 365;
-        const expectedTotalCostsAnnualized = tradesPerYear * (spreadCostPercent * 2 + slippageCostPercent * 2 + feeCostPercent);
-        const expectedNetYieldAnnualized = expectedGrossYieldAnnualized - expectedTotalCostsAnnualized;
-
-        const fundingRateVolatilityAnnualized = fundingRateStdDevAnnualized;
-        const priceAtrPercent = atrPercent;
-
-        const direction: 'short' | 'long' = fundingRateHourly >= 0 ? 'short' : 'long';
-        const estimatedDailyPnlUsd = notionalUsd * fundingRateDaily;
-        const estimatedMonthlyPnlUsd = estimatedDailyPnlUsd * 30;
-
-        return {
-          coin: asset.name,
-          markPrice: effectivePrice,
-          oraclePrice,
-          fundingRateHourly,
-          fundingRateDaily,
-          fundingRateAnnualized,
-          openInterestBase,
-          openInterestUsd,
-          dayNotionalVolumeUsd,
-          dayBaseVolume: dayBaseVolume > 0 ? dayBaseVolume : undefined,
-          premium,
-          direction,
-          opportunityScore,
-          liquidityScore,
-          volumeScore,
-          fundingStrength,
-          stabilityAdjustment: normalizedStability,
-          feasibilityWeight,
-          fundingRateStdDevAnnualized,
-          historicalVolatility,
-          avgFundingRate24h,
-          expectedFundingRateEwma,
-          expectedGrossYieldAnnualized,
-          expectedTotalCostsAnnualized,
-          expectedNetYieldAnnualized,
-          spreadCostPercent,
-          slippageCostPercent,
-          feeCostPercent,
-          tradesPerYear,
-          fundingRateVolatilityAnnualized,
-          priceAtrPercent,
-          expectedDailyReturnPercent: fundingRateDaily,
-          estimatedDailyPnlUsd,
-          estimatedMonthlyPnlUsd,
-          notionalUsd,
-          maxLeverage: asset.maxLeverage,
-          szDecimals: asset.szDecimals,
-          onlyIsolated: asset.onlyIsolated,
-          marginTableId: asset.marginTableId,
-        } as HyperliquidOpportunity;
-      })
-      .filter((market): market is HyperliquidOpportunity => market !== null);
-
-    const maxOpenInterestUsd = markets.reduce((max, market) => Math.max(max, market.openInterestUsd ?? 0), 0);
-    const maxVolumeUsd = markets.reduce((max, market) => Math.max(max, market.dayNotionalVolumeUsd ?? 0), 0);
-    const maxDepthEstimate = markets.reduce((max, market) => {
-      const depth = market.dayNotionalVolumeUsd > 0 ? market.dayNotionalVolumeUsd / 24 : 0;
-      return Math.max(max, depth);
-    }, 0);
-
-    const depthWeights = { oi: 0.4, volume: 0.3, depth: 0.3 } as const;
-
-    markets.forEach((market) => {
-      const oiScore = maxOpenInterestUsd > 0 ? Math.min(market.openInterestUsd / maxOpenInterestUsd, 1) : 0;
-      const volumeScoreNormalized = maxVolumeUsd > 0 ? Math.min(market.dayNotionalVolumeUsd / maxVolumeUsd, 1) : 0;
-      const depthEstimate = market.dayNotionalVolumeUsd > 0 ? market.dayNotionalVolumeUsd / 24 : 0;
-      const depthNormalized = maxDepthEstimate > 0 ? Math.min(depthEstimate / maxDepthEstimate, 1) : 0;
-      const spreadScore = market.spreadCostPercent !== undefined
-        ? Math.max(0, 1 - (market.spreadCostPercent / 0.005))
-        : 0.5;
-      const depthComposite = Math.min(1, depthNormalized * 0.7 + spreadScore * 0.3);
-      const marketHealthScore = Math.max(0, Math.min(1, (
-        depthWeights.oi * oiScore +
-        depthWeights.volume * volumeScoreNormalized +
-        depthWeights.depth * depthComposite
-      )));
-
-      const fundingVol = market.fundingRateVolatilityAnnualized ?? 0;
-      const priceVol = market.priceAtrPercent ?? 0;
-      const combinedVolatility = Math.sqrt(
-        RISK_WEIGHT_FUNDING * Math.pow(fundingVol, 2) +
-        RISK_WEIGHT_PRICE * Math.pow(priceVol, 2),
-      );
-      const healthForRisk = Math.max(marketHealthScore, MIN_MARKET_HEALTH);
-      const compositeRiskFactor = healthForRisk > 0 ? combinedVolatility / healthForRisk : undefined;
-      const expectedNetYield = market.expectedNetYieldAnnualized ?? 0;
-      const ranyScore = compositeRiskFactor && compositeRiskFactor > 0 ? expectedNetYield / compositeRiskFactor : undefined;
-
-      market.marketHealthScore = marketHealthScore;
-      market.compositeRiskFactor = compositeRiskFactor;
-      market.ranyScore = ranyScore;
-    });
-
-    const maxOpportunityScore = markets.reduce((max, market) => Math.max(max, Math.max(market.opportunityScore, 0)), 0);
-    const maxRanyScore = markets.reduce((max, market) => Math.max(max, Math.max(market.ranyScore ?? 0, 0)), 0);
-
-    markets.forEach((market) => {
-      const normalizedOpportunity = maxOpportunityScore > 0
-        ? Math.max(market.opportunityScore, 0) / maxOpportunityScore
-        : 0;
-      const normalizedRany = maxRanyScore > 0 && market.ranyScore !== undefined
-        ? Math.max(market.ranyScore, 0) / maxRanyScore
-        : 0;
-
-      market.combinedScore = (
-        normalizedOpportunity * BLENDED_SCORE_WEIGHTS.opportunity +
-        normalizedRany * BLENDED_SCORE_WEIGHTS.rany
-      );
-    });
-
-    const filteredMarkets = markets.filter((market) => {
-      if (directionFilter !== 'all' && market.direction !== directionFilter) {
-        return false;
-      }
-      if (market.openInterestUsd < minOpenInterestUsd) {
-        return false;
-      }
-      if (market.dayNotionalVolumeUsd < minVolumeUsd) {
-        return false;
-      }
-      return true;
-    });
-
-    const sortedMarkets = [...filteredMarkets].sort((a, b) => {
-      switch (sortKey) {
-        case 'funding':
-          return Math.abs(b.fundingRateAnnualized) - Math.abs(a.fundingRateAnnualized);
-        case 'liquidity':
-          return b.openInterestUsd - a.openInterestUsd;
-        case 'volume':
-          return b.dayNotionalVolumeUsd - a.dayNotionalVolumeUsd;
-        case 'score':
-        default: {
-          const aScore = a.combinedScore ?? a.opportunityScore;
-          const bScore = b.combinedScore ?? b.opportunityScore;
-          return bScore - aScore;
-        }
-      }
-    });
-
-    const topMarkets = sortedMarkets.slice(0, limit);
-
-    const averageFundingAnnualized =
-      filteredMarkets.length > 0
-        ? filteredMarkets.reduce((sum, market) => sum + market.fundingRateAnnualized, 0) / filteredMarkets.length
-        : 0;
-
-    const averageAbsoluteFundingAnnualized =
-      filteredMarkets.length > 0
-        ? filteredMarkets.reduce((sum, market) => sum + Math.abs(market.fundingRateAnnualized), 0) / filteredMarkets.length
-        : 0;
+    const topMarkets = result.sortedMarkets.slice(0, limit);
 
     res.json({
       success: true,
@@ -1375,12 +1440,7 @@ router.get('/opportunities', async (req: Request, res: Response) => {
           direction: directionFilter,
           sort: sortKey,
         },
-        totals: {
-          availableMarkets: markets.length,
-          filteredMarkets: filteredMarkets.length,
-          averageFundingAnnualized,
-          averageAbsoluteFundingAnnualized,
-        },
+        totals: result.totals,
         markets: topMarkets,
       },
     });
@@ -1389,6 +1449,235 @@ router.get('/opportunities', async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error occurred while fetching opportunities',
+    });
+  }
+});
+
+router.get('/opportunities/recommendation', async (req: Request, res: Response) => {
+  const address = parseStringParam(req.query.address, '').trim();
+  if (!address) {
+    return res.status(400).json({
+      success: false,
+      error: 'Wallet address is required to generate a recommendation',
+    });
+  }
+
+  const candidateCount = clamp(Math.round(parseNumericParam(req.query.candidates, 10)), 1, 50);
+  const minOpenInterestUsd = Math.max(0, parseNumericParam(req.query.minOpenInterestUsd, 3_000_000));
+  const minVolumeUsd = Math.max(0, parseNumericParam(req.query.minVolumeUsd, 1_000_000));
+  const baselineNotionalUsd = Math.max(1, parseNumericParam(req.query.notionalUsd, 10_000));
+  const tradingCostDaily = Math.max(0, parseNumericParam(req.query.tradingCostDaily, 0));
+
+  const liquidityBufferPercent = clamp(parseNumericParam(req.query.liquidityBufferPercent, 20), 0, 90) / 100;
+  const targetLeverageInput = Math.max(1, parseNumericParam(req.query.targetLeverage, 3));
+  const maxLeverageCap = Math.max(1, parseNumericParam(req.query.maxLeverage, 10));
+  const maxOiPercent = clamp(parseNumericParam(req.query.maxOiPercent, 5), 1, 50);
+  const maxVolumePercent = clamp(parseNumericParam(req.query.maxVolumePercent, 10), 1, 100);
+  const manualLiquidityUsd = parseOptionalNumericParam(req.query.liquidityUsd);
+
+  try {
+    const clearinghouseState = await fetchHyperliquidInfo<HyperliquidClearinghouseState>({
+      type: 'clearinghouseState',
+      user: address,
+    }, { ttlMs: 2_000 });
+
+    const withdrawableUsd = parseNumberString(clearinghouseState.withdrawable);
+    const availableLiquidityUsd = manualLiquidityUsd ?? withdrawableUsd;
+
+    if (!Number.isFinite(availableLiquidityUsd) || availableLiquidityUsd <= 0) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          address,
+          liquidity: {
+            withdrawableUsd,
+            overrideUsd: manualLiquidityUsd ?? null,
+            availableLiquidityUsd: availableLiquidityUsd || 0,
+            liquidityBufferPercent,
+            liquidityBufferUsd: 0,
+            usableLiquidityUsd: 0,
+          },
+          recommendation: null,
+          reason: 'No usable liquidity detected on Hyperliquid for the provided wallet',
+          candidates: [],
+        },
+      });
+    }
+
+    const usableLiquidityUsd = Math.max(0, availableLiquidityUsd * (1 - liquidityBufferPercent));
+    const liquidityBufferUsd = availableLiquidityUsd - usableLiquidityUsd;
+
+    if (usableLiquidityUsd <= 0) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          address,
+          liquidity: {
+            withdrawableUsd,
+            overrideUsd: manualLiquidityUsd ?? null,
+            availableLiquidityUsd,
+            liquidityBufferPercent,
+            liquidityBufferUsd,
+            usableLiquidityUsd,
+          },
+          recommendation: null,
+          reason: 'After applying the requested liquidity buffer there is no capital available for a short position',
+          candidates: [],
+        },
+      });
+    }
+
+    const opportunityResult = await computeHyperliquidOpportunities({
+      minOpenInterestUsd,
+      minVolumeUsd,
+      notionalUsd: baselineNotionalUsd,
+      tradingCostDaily,
+      direction: 'short',
+      sort: 'score',
+    });
+
+    const candidates = opportunityResult.sortedMarkets
+      .filter((market) => market.direction === 'short')
+      .slice(0, candidateCount);
+
+    const viableCandidates = candidates.filter((market) => {
+      const score = market.combinedScore ?? market.opportunityScore;
+      return Number.isFinite(score) && (score ?? 0) > 0;
+    });
+
+    if (viableCandidates.length === 0) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          address,
+          liquidity: {
+            withdrawableUsd,
+            overrideUsd: manualLiquidityUsd ?? null,
+            availableLiquidityUsd,
+            liquidityBufferPercent,
+            liquidityBufferUsd,
+            usableLiquidityUsd,
+          },
+          recommendation: null,
+          reason: 'No short opportunities cleared the blended score filters',
+          candidates,
+        },
+      });
+    }
+
+    const topCandidate = viableCandidates[0];
+
+    const marketMaxLeverage = topCandidate.maxLeverage ?? targetLeverageInput;
+    const recommendedLeverage = Math.max(1, Math.min(targetLeverageInput, marketMaxLeverage, maxLeverageCap));
+
+    const oiCapUsd = Number.isFinite(topCandidate.openInterestUsd) && topCandidate.openInterestUsd > 0
+      ? topCandidate.openInterestUsd * (maxOiPercent / 100)
+      : Number.POSITIVE_INFINITY;
+    const volumeCapUsd = Number.isFinite(topCandidate.dayNotionalVolumeUsd) && topCandidate.dayNotionalVolumeUsd > 0
+      ? topCandidate.dayNotionalVolumeUsd * (maxVolumePercent / 100)
+      : Number.POSITIVE_INFINITY;
+    const modelNotionalCapUsd = Number.isFinite(topCandidate.notionalUsd) && topCandidate.notionalUsd > 0
+      ? topCandidate.notionalUsd * 1.5
+      : Number.POSITIVE_INFINITY;
+
+    const notionalCaps = [oiCapUsd, volumeCapUsd, modelNotionalCapUsd].filter(Number.isFinite) as number[];
+    const maxNotionalUsd = notionalCaps.length > 0 ? Math.min(...notionalCaps) : Number.POSITIVE_INFINITY;
+
+    let recommendedNotionalUsd = usableLiquidityUsd * recommendedLeverage;
+    if (Number.isFinite(maxNotionalUsd)) {
+      recommendedNotionalUsd = Math.min(recommendedNotionalUsd, maxNotionalUsd);
+    }
+
+    if (!Number.isFinite(recommendedNotionalUsd) || recommendedNotionalUsd <= 0) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          address,
+          liquidity: {
+            withdrawableUsd,
+            overrideUsd: manualLiquidityUsd ?? null,
+            availableLiquidityUsd,
+            liquidityBufferPercent,
+            liquidityBufferUsd,
+            usableLiquidityUsd,
+          },
+          recommendation: null,
+          reason: 'Liquidity and market caps result in a negligible position size',
+          candidates: viableCandidates,
+        },
+      });
+    }
+
+    const impliedLeverage = usableLiquidityUsd > 0 ? recommendedNotionalUsd / usableLiquidityUsd : recommendedLeverage;
+    const finalLeverage = Math.max(1, Math.min(impliedLeverage, recommendedLeverage, marketMaxLeverage, maxLeverageCap));
+    recommendedNotionalUsd = usableLiquidityUsd * finalLeverage;
+
+    const markPrice = topCandidate.markPrice;
+    const rawPositionSize = markPrice > 0 ? recommendedNotionalUsd / markPrice : 0;
+    const sizeDecimals = typeof topCandidate.szDecimals === 'number' ? Math.max(0, Math.min(8, topCandidate.szDecimals)) : 4;
+    const positionSize = Number.isFinite(rawPositionSize)
+      ? Number(rawPositionSize.toFixed(sizeDecimals))
+      : 0;
+
+    const expectedDailyPnlUsd = topCandidate.fundingRateDaily * recommendedNotionalUsd;
+    const expectedMonthlyPnlUsd = expectedDailyPnlUsd * 30;
+
+    res.json({
+      success: true,
+      data: {
+        address,
+        liquidity: {
+          withdrawableUsd,
+          overrideUsd: manualLiquidityUsd ?? null,
+          availableLiquidityUsd,
+          liquidityBufferPercent,
+          liquidityBufferUsd,
+          usableLiquidityUsd,
+        },
+        parameters: {
+          targetLeverage: targetLeverageInput,
+          finalLeverage,
+          maxLeverageCap,
+          candidateCount,
+          maxOiPercent,
+          maxVolumePercent,
+          liquidityBufferPercent,
+        },
+        recommendation: {
+          asset: topCandidate.coin,
+          positionSize,
+          positionNotionalUsd: recommendedNotionalUsd,
+          leverage: finalLeverage,
+          markPrice,
+          combinedScore: topCandidate.combinedScore ?? topCandidate.opportunityScore,
+          opportunityScore: topCandidate.opportunityScore,
+          ranyScore: topCandidate.ranyScore ?? null,
+          fundingRateAnnualized: topCandidate.fundingRateAnnualized,
+          expectedDailyPnlUsd,
+          expectedMonthlyPnlUsd,
+          openInterestUsd: topCandidate.openInterestUsd,
+          dayNotionalVolumeUsd: topCandidate.dayNotionalVolumeUsd,
+          maxLeverage: topCandidate.maxLeverage ?? null,
+          expectedNetYieldAnnualized: topCandidate.expectedNetYieldAnnualized ?? null,
+        },
+        candidates: viableCandidates.slice(0, Math.min(5, viableCandidates.length)).map((market) => ({
+          asset: market.coin,
+          combinedScore: market.combinedScore ?? market.opportunityScore,
+          opportunityScore: market.opportunityScore,
+          ranyScore: market.ranyScore ?? null,
+          fundingRateAnnualized: market.fundingRateAnnualized,
+          openInterestUsd: market.openInterestUsd,
+          dayNotionalVolumeUsd: market.dayNotionalVolumeUsd,
+          expectedNetYieldAnnualized: market.expectedNetYieldAnnualized ?? null,
+          maxLeverage: market.maxLeverage ?? null,
+        })),
+      },
+    });
+  } catch (error) {
+    console.error('Error generating Hyperliquid recommendation:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to generate Hyperliquid recommendation',
     });
   }
 });
