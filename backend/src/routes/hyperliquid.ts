@@ -24,6 +24,64 @@ const hyperliquidRequestTimestamps: number[] = [];
 const hyperliquidCache = new Map<string, { timestamp: number; data: unknown }>();
 const hyperliquidInFlightRequests = new Map<string, Promise<unknown>>();
 
+export interface HyperliquidMarginTier {
+  lowerBound: number;
+  maxLeverage: number;
+}
+
+export interface HyperliquidMarginTable {
+  description?: string;
+  marginTiers: HyperliquidMarginTier[];
+}
+
+let latestMarginTables: Map<number, HyperliquidMarginTable> | null = null;
+
+export const setLatestMarginTables = (tables: Map<number, HyperliquidMarginTable> | null) => {
+  latestMarginTables = tables;
+};
+
+export const getApplicableMarginTableLeverage = (
+  marginTableId: number | undefined,
+  positionNotionalUsd: number,
+): number | undefined => {
+  if (!marginTableId || !latestMarginTables?.has(marginTableId)) {
+    return undefined;
+  }
+
+  const table = latestMarginTables.get(marginTableId);
+  if (!table || !Array.isArray(table.marginTiers) || table.marginTiers.length === 0) {
+    return undefined;
+  }
+
+  const sortedTiers = [...table.marginTiers].sort((a, b) => a.lowerBound - b.lowerBound);
+  let applicableTier: HyperliquidMarginTier | undefined;
+
+  for (const tier of sortedTiers) {
+    if (positionNotionalUsd >= tier.lowerBound) {
+      applicableTier = tier;
+    } else {
+      break;
+    }
+  }
+
+  const maxLeverage = applicableTier?.maxLeverage;
+  return Number.isFinite(maxLeverage) && maxLeverage !== undefined && maxLeverage > 0
+    ? maxLeverage
+    : undefined;
+};
+
+export const calculateGuardedLiquidationPrice = (
+  entryPrice: number,
+  positionSize: number,
+  collateralUsd: number,
+): number | null => {
+  if (!(Number.isFinite(entryPrice) && entryPrice > 0)) return null;
+  if (!(Number.isFinite(positionSize) && positionSize > 0)) return null;
+  if (!(Number.isFinite(collateralUsd) && collateralUsd > 0)) return null;
+
+  return entryPrice + (collateralUsd / positionSize);
+};
+
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function ensureWithinRateLimit(): Promise<void> {
@@ -321,6 +379,59 @@ async function computeHyperliquidOpportunities({
   }
 
   const [metaInfo, assetCtxs] = payload;
+
+  if (Array.isArray(metaInfo?.marginTables)) {
+    const marginTableMap = new Map<number, HyperliquidMarginTable>();
+
+    metaInfo.marginTables.forEach(([id, rawTable]) => {
+      const numericId = Number(id);
+      if (!Number.isFinite(numericId) || numericId <= 0) {
+        return;
+      }
+
+      const tableObject = typeof rawTable === 'object' && rawTable !== null ? rawTable as Record<string, unknown> : null;
+      const rawTiers = Array.isArray((tableObject as any)?.marginTiers) ? (tableObject as any).marginTiers : [];
+
+      const tiers: HyperliquidMarginTier[] = rawTiers
+        .map((tier: unknown) => {
+          if (!tier || typeof tier !== 'object') return null;
+          const tierObj = tier as Record<string, unknown>;
+
+          const lowerBoundRaw = tierObj.lowerBound;
+          const maxLeverageRaw = tierObj.maxLeverage;
+
+          const lowerBound = typeof lowerBoundRaw === 'number'
+            ? lowerBoundRaw
+            : Number.parseFloat(String(lowerBoundRaw ?? ''));
+          const maxLeverage = typeof maxLeverageRaw === 'number'
+            ? maxLeverageRaw
+            : Number.parseFloat(String(maxLeverageRaw ?? ''));
+
+          if (!Number.isFinite(maxLeverage) || maxLeverage <= 0) {
+            return null;
+          }
+
+          return {
+            lowerBound: Number.isFinite(lowerBound) && lowerBound >= 0 ? lowerBound : 0,
+            maxLeverage,
+          } satisfies HyperliquidMarginTier;
+        })
+        .filter((tier: HyperliquidMarginTier | null): tier is HyperliquidMarginTier => tier !== null)
+        .sort((a: HyperliquidMarginTier, b: HyperliquidMarginTier) => a.lowerBound - b.lowerBound);
+
+      if (tiers.length > 0) {
+        marginTableMap.set(numericId, {
+          description: typeof (tableObject as any)?.description === 'string' ? (tableObject as any).description : undefined,
+          marginTiers: tiers,
+        });
+      }
+    });
+
+    setLatestMarginTables(marginTableMap.size > 0 ? marginTableMap : null);
+  } else {
+    setLatestMarginTables(null);
+  }
+
   const universe = Array.isArray(metaInfo?.universe) ? metaInfo.universe : [];
   if (!Array.isArray(assetCtxs)) {
     throw new Error('Missing asset contexts in Hyperliquid payload');
@@ -1588,6 +1699,8 @@ router.get('/opportunities/recommendation', async (req: Request, res: Response) 
       recommendedNotionalUsd = Math.min(recommendedNotionalUsd, maxNotionalUsd);
     }
 
+    recommendedNotionalUsd = Math.min(recommendedNotionalUsd, usableLiquidityUsd);
+
     if (!Number.isFinite(recommendedNotionalUsd) || recommendedNotionalUsd <= 0) {
       return res.status(200).json({
         success: true,
@@ -1608,16 +1721,65 @@ router.get('/opportunities/recommendation', async (req: Request, res: Response) 
       });
     }
 
+    const marginTableLeverageCap = getApplicableMarginTableLeverage(topCandidate.marginTableId, recommendedNotionalUsd);
+
     const impliedLeverage = usableLiquidityUsd > 0 ? recommendedNotionalUsd / usableLiquidityUsd : recommendedLeverage;
-    const finalLeverage = Math.max(1, Math.min(impliedLeverage, recommendedLeverage, marketMaxLeverage, maxLeverageCap));
+    const leverageCaps = [
+      impliedLeverage,
+      recommendedLeverage,
+      marketMaxLeverage,
+      maxLeverageCap,
+      marginTableLeverageCap ?? Number.POSITIVE_INFINITY,
+    ].filter((value) => Number.isFinite(value) && value > 0) as number[];
+
+    const guardLeverageCap = usableLiquidityUsd > 0 ? recommendedNotionalUsd / usableLiquidityUsd : undefined;
+    if (guardLeverageCap !== undefined && Number.isFinite(guardLeverageCap) && guardLeverageCap > 0) {
+      leverageCaps.push(guardLeverageCap);
+    }
+
+    const finalLeverage = leverageCaps.length > 0 ? Math.min(...leverageCaps) : recommendedLeverage;
+
+    if (!Number.isFinite(finalLeverage) || finalLeverage <= 0) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          address,
+          liquidity: {
+            withdrawableUsd,
+            overrideUsd: manualLiquidityUsd ?? null,
+            availableLiquidityUsd,
+            liquidityBufferPercent,
+            liquidityBufferUsd,
+            usableLiquidityUsd,
+          },
+          recommendation: null,
+          reason: 'Unable to compute a safe leverage under the current constraints',
+          candidates: viableCandidates,
+        },
+      });
+    }
+
     recommendedNotionalUsd = usableLiquidityUsd * finalLeverage;
 
-    const markPrice = topCandidate.markPrice;
-    const rawPositionSize = markPrice > 0 ? recommendedNotionalUsd / markPrice : 0;
+    const markPriceRaw = Number.isFinite(topCandidate.markPrice) ? topCandidate.markPrice : null;
+    const entryPrice = markPriceRaw && markPriceRaw > 0 ? markPriceRaw : null;
+
+    const rawPositionSize = entryPrice && entryPrice > 0 ? recommendedNotionalUsd / entryPrice : 0;
     const sizeDecimals = typeof topCandidate.szDecimals === 'number' ? Math.max(0, Math.min(8, topCandidate.szDecimals)) : 4;
     const positionSize = Number.isFinite(rawPositionSize)
       ? Number(rawPositionSize.toFixed(sizeDecimals))
       : 0;
+
+    const exchangeLiquidationLeverage = marginTableLeverageCap ?? marketMaxLeverage ?? null;
+    const liquidationPrice = entryPrice && entryPrice > 0 && exchangeLiquidationLeverage && exchangeLiquidationLeverage > 0
+      ? entryPrice * (1 + (1 / exchangeLiquidationLeverage))
+      : null;
+    const maxPriceBeforeLiquidation = entryPrice && entryPrice > 0
+      ? calculateGuardedLiquidationPrice(entryPrice, positionSize, usableLiquidityUsd)
+      : null;
+    const guardMultiple = maxPriceBeforeLiquidation && entryPrice && entryPrice > 0
+      ? maxPriceBeforeLiquidation / entryPrice
+      : null;
 
     const expectedDailyPnlUsd = topCandidate.fundingRateDaily * recommendedNotionalUsd;
     const expectedMonthlyPnlUsd = expectedDailyPnlUsd * 30;
@@ -1648,7 +1810,11 @@ router.get('/opportunities/recommendation', async (req: Request, res: Response) 
           positionSize,
           positionNotionalUsd: recommendedNotionalUsd,
           leverage: finalLeverage,
-          markPrice,
+          entryPrice,
+          markPrice: markPriceRaw ?? 0,
+          liquidationPrice: liquidationPrice ?? null,
+          maxPriceBeforeLiquidation: maxPriceBeforeLiquidation ?? null,
+          guardMultiple: guardMultiple ?? null,
           combinedScore: topCandidate.combinedScore ?? topCandidate.opportunityScore,
           opportunityScore: topCandidate.opportunityScore,
           ranyScore: topCandidate.ranyScore ?? null,
