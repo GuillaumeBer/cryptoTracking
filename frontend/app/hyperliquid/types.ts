@@ -181,3 +181,67 @@ export interface HyperliquidOpportunityResponse {
   data?: HyperliquidOpportunityPayload;
   error?: string;
 }
+
+export interface HyperliquidRecommendationLiquidity {
+  withdrawableUsd: number;
+  overrideUsd: number | null;
+  availableLiquidityUsd: number;
+  liquidityBufferPercent: number;
+  liquidityBufferUsd: number;
+  usableLiquidityUsd: number;
+}
+
+export interface HyperliquidRecommendationParameters {
+  targetLeverage: number;
+  finalLeverage: number;
+  maxLeverageCap: number;
+  candidateCount: number;
+  maxOiPercent: number;
+  maxVolumePercent: number;
+  liquidityBufferPercent: number;
+}
+
+export interface HyperliquidRecommendationSuggestion {
+  asset: string;
+  positionSize: number;
+  positionNotionalUsd: number;
+  leverage: number;
+  markPrice: number;
+  combinedScore: number | null;
+  opportunityScore: number;
+  ranyScore: number | null;
+  fundingRateAnnualized: number;
+  expectedDailyPnlUsd: number;
+  expectedMonthlyPnlUsd: number;
+  openInterestUsd: number;
+  dayNotionalVolumeUsd: number;
+  maxLeverage: number | null;
+  expectedNetYieldAnnualized: number | null;
+}
+
+export interface HyperliquidRecommendationCandidate {
+  asset: string;
+  combinedScore: number | null;
+  opportunityScore: number;
+  ranyScore: number | null;
+  fundingRateAnnualized: number;
+  openInterestUsd: number;
+  dayNotionalVolumeUsd: number;
+  expectedNetYieldAnnualized: number | null;
+  maxLeverage: number | null;
+}
+
+export interface HyperliquidRecommendationPayload {
+  address: string;
+  liquidity: HyperliquidRecommendationLiquidity;
+  parameters?: HyperliquidRecommendationParameters;
+  recommendation: HyperliquidRecommendationSuggestion | null;
+  reason?: string;
+  candidates: HyperliquidRecommendationCandidate[];
+}
+
+export interface HyperliquidRecommendationResponse {
+  success: boolean;
+  data?: HyperliquidRecommendationPayload;
+  error?: string;
+}
