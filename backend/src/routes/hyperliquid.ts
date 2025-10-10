@@ -1808,6 +1808,7 @@ router.get('/opportunities/recommendation', async (req: Request, res: Response) 
         recommendation: {
           asset: topCandidate.coin,
           positionSize,
+          positionSizeDecimals: sizeDecimals,
           positionNotionalUsd: recommendedNotionalUsd,
           leverage: finalLeverage,
           entryPrice,

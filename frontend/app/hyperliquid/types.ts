@@ -204,6 +204,7 @@ export interface HyperliquidRecommendationParameters {
 export interface HyperliquidRecommendationSuggestion {
   asset: string;
   positionSize: number;
+  positionSizeDecimals: number;
   positionNotionalUsd: number;
   leverage: number;
   entryPrice: number | null;

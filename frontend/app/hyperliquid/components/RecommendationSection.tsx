@@ -309,14 +309,19 @@ export function RecommendationSection({ walletAddress, filters }: Recommendation
                 <p className="text-sm font-medium text-emerald-700 dark:text-emerald-300 mb-1">Recommended Short</p>
                 <h3 className="text-2xl font-semibold text-emerald-900 dark:text-emerald-200">{recommendation.asset}</h3>
                 <p className="text-sm text-emerald-600 dark:text-emerald-300">
-                  {formatNumber(recommendation.positionSize, 4)} contracts · {formatCurrency(recommendation.positionNotionalUsd)} notiona
-l
+                  {formatNumber(recommendation.positionSize, recommendation.positionSizeDecimals ?? 4)} contracts · {formatCurrency(recommendation.positionNotionalUsd)} notional
                 </p>
               </div>
-              <div className="grid grid-cols-2 gap-4 text-sm text-slate-700 dark:text-slate-200">
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 text-sm text-slate-700 dark:text-slate-200">
                 <div>
                   <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">Leverage</p>
                   <p className="text-base font-semibold">{formatNumber(recommendation.leverage, 2)}×</p>
+                </div>
+                <div>
+                  <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">Position Size</p>
+                  <p className="text-base font-semibold">
+                    {formatNumber(recommendation.positionSize, recommendation.positionSizeDecimals ?? 4)} contracts
+                  </p>
                 </div>
                 <div>
                   <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">Funding APR</p>
