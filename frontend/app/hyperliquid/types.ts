@@ -206,7 +206,11 @@ export interface HyperliquidRecommendationSuggestion {
   positionSize: number;
   positionNotionalUsd: number;
   leverage: number;
+  entryPrice: number | null;
   markPrice: number;
+  liquidationPrice: number | null;
+  maxPriceBeforeLiquidation: number | null;
+  guardMultiple: number | null;
   combinedScore: number | null;
   opportunityScore: number;
   ranyScore: number | null;
