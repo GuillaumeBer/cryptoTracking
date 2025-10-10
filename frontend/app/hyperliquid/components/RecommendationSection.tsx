@@ -109,6 +109,25 @@ export function RecommendationSection({ walletAddress, filters }: Recommendation
     return formatNumber(value, 2);
   };
 
+  const formatPrice = (value: number | null | undefined) => {
+    if (value === null || value === undefined || !Number.isFinite(value)) {
+      return '—';
+    }
+    return formatCurrency(value);
+  };
+
+  const renderGuardMultiple = (value: number | null | undefined) => {
+    if (value === null || value === undefined || !Number.isFinite(value)) {
+      return null;
+    }
+
+    return (
+      <p className="text-xs text-emerald-600 dark:text-emerald-300 mt-0.5">
+        Guarded to {formatNumber(value, 2)}×
+      </p>
+    );
+  };
+
   return (
     <section className="rounded-2xl border border-slate-200/70 dark:border-slate-800/70 bg-white/80 dark:bg-slate-900/50 shadow-sm">
       <div className="p-6 border-b border-slate-200/60 dark:border-slate-800/60 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -290,14 +309,19 @@ export function RecommendationSection({ walletAddress, filters }: Recommendation
                 <p className="text-sm font-medium text-emerald-700 dark:text-emerald-300 mb-1">Recommended Short</p>
                 <h3 className="text-2xl font-semibold text-emerald-900 dark:text-emerald-200">{recommendation.asset}</h3>
                 <p className="text-sm text-emerald-600 dark:text-emerald-300">
-                  {formatNumber(recommendation.positionSize, 4)} contracts · {formatCurrency(recommendation.positionNotionalUsd)} notiona
-l
+                  {formatNumber(recommendation.positionSize, recommendation.positionSizeDecimals ?? 4)} contracts · {formatCurrency(recommendation.positionNotionalUsd)} notional
                 </p>
               </div>
-              <div className="grid grid-cols-2 gap-4 text-sm text-slate-700 dark:text-slate-200">
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 text-sm text-slate-700 dark:text-slate-200">
                 <div>
                   <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">Leverage</p>
                   <p className="text-base font-semibold">{formatNumber(recommendation.leverage, 2)}×</p>
+                </div>
+                <div>
+                  <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">Position Size</p>
+                  <p className="text-base font-semibold">
+                    {formatNumber(recommendation.positionSize, recommendation.positionSizeDecimals ?? 4)} contracts
+                  </p>
                 </div>
                 <div>
                   <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">Funding APR</p>
@@ -310,6 +334,21 @@ l
                 <div>
                   <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">Expected Monthly PnL</p>
                   <p className="text-base font-semibold">{formatCurrency(recommendation.expectedMonthlyPnlUsd)}</p>
+                </div>
+              </div>
+              <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm text-slate-700 dark:text-slate-200">
+                <div>
+                  <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">Entry Price</p>
+                  <p className="text-base font-semibold">{formatPrice(recommendation.entryPrice ?? recommendation.markPrice)}</p>
+                </div>
+                <div>
+                  <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">Liquidation Price</p>
+                  <p className="text-base font-semibold">{formatPrice(recommendation.liquidationPrice)}</p>
+                </div>
+                <div>
+                  <p className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">Max Price Before Liquidation</p>
+                  <p className="text-base font-semibold">{formatPrice(recommendation.maxPriceBeforeLiquidation)}</p>
+                  {renderGuardMultiple(recommendation.guardMultiple)}
                 </div>
               </div>
             </div>
